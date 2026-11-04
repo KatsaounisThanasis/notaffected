@@ -1,0 +1,240 @@
+"""Tests for deterministic read-only probes and host transport (Task 2)."""
+
+from notaffected.model import Precondition, ProbeStatus, VexJustification
+from notaffected.probes.primitives import run_probe
+from notaffected.probes.runner import CommandResult, LocalRunner, MockRunner
+
+
+def test_kernel_module_loaded_met_and_not_met():
+    proc_modules = "nf_tables 327680 12 - Live 0x0000000000000000\ntls 163840 0 - Live 0x0000000000000000\n"
+    runner = MockRunner(
+        host_name="node-01",
+        responses={
+            ("cat", "/proc/modules"): CommandResult(0, proc_modules, ""),
+        },
+    )
+    pre_met = Precondition(
+        probe="kernel_module_loaded",
+        params={"module": "nf_tables"},
+        description="nf_tables module loaded",
+    )
+    res_met = run_probe(pre_met, runner)
+    assert res_met.status == ProbeStatus.MET
+    assert "nf_tables" in res_met.evidence
+
+    pre_not_met = Precondition(
+        probe="kernel_module_loaded",
+        params={"module": "ksmbd"},
+        description="ksmbd module loaded",
+    )
+    res_not_met = run_probe(pre_not_met, runner)
+    assert res_not_met.status == ProbeStatus.NOT_MET
+    assert "not loaded" in res_not_met.evidence
+
+
+def test_sysctl_equals_met_not_met_and_unknown():
+    runner = MockRunner(
+        host_name="node-01",
+        responses={
+            ("sysctl", "-n", "kernel.unprivileged_userns_clone"): CommandResult(0, "1\n", ""),
+            ("sysctl", "-n", "net.mptcp.enabled"): CommandResult(0, "0\n", ""),
+            ("sysctl", "-n", "kernel.missing_key"): CommandResult(255, "", "sysctl: cannot stat"),
+        },
+    )
+    p1 = Precondition("sysctl_equals", {"key": "kernel.unprivileged_userns_clone", "value": "1"}, "userns enabled")
+    assert run_probe(p1, runner).status == ProbeStatus.MET
+
+    p2 = Precondition("sysctl_equals", {"key": "net.mptcp.enabled", "value": "1"}, "mptcp enabled")
+    assert run_probe(p2, runner).status == ProbeStatus.NOT_MET
+
+    p3 = Precondition("sysctl_equals", {"key": "kernel.missing_key", "value": "1"}, "missing sysctl")
+    assert run_probe(p3, runner).status == ProbeStatus.UNKNOWN
+
+
+def test_network_listener_loopback_vs_public():
+    # Loopback-only host (including %lo scope suffix and IPv6 ::1)
+    ss_loopback_only = (
+        "udp UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:*\n"
+        "tcp LISTEN 0 4096 127.0.0.1:631 0.0.0.0:* users:((\"cupsd\",pid=912,fd=7))\n"
+        "tcp LISTEN 0 4096 [::1]:631 [::]:* users:((\"cupsd\",pid=912,fd=6))\n"
+    )
+    runner_local = MockRunner(
+        host_name="laptop-01",
+        responses={("ss", "-tulpnH"): CommandResult(0, ss_loopback_only, "")},
+    )
+    pre_any_tcp = Precondition(
+        probe="network_listener",
+        params={"proto": "tcp", "scope": "non_loopback"},
+        description="Any non-loopback TCP listener",
+    )
+    res_local = run_probe(pre_any_tcp, runner_local)
+    assert res_local.status == ProbeStatus.NOT_MET
+    assert "only loopback" in res_local.evidence.lower() or "no non-loopback" in res_local.evidence.lower()
+
+    # Public listener host (0.0.0.0:443 and *:22)
+    ss_public = (
+        "udp UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:*\n"
+        "tcp LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:((\"nginx\",pid=1024,fd=6))\n"
+        "udp UNCONN 0 0 0.0.0.0:631 0.0.0.0:* users:((\"cups-browsed\",pid=1100,fd=8))\n"
+    )
+    runner_pub = MockRunner(
+        host_name="edge-01",
+        responses={("ss", "-tulpnH"): CommandResult(0, ss_public, "")},
+    )
+    res_pub = run_probe(pre_any_tcp, runner_pub)
+    assert res_pub.status == ProbeStatus.MET
+    assert "0.0.0.0:443" in res_pub.evidence
+
+    pre_cups_udp = Precondition(
+        probe="network_listener",
+        params={"proto": "udp", "port": 631, "scope": "non_loopback"},
+        description="UDP 631 non-loopback listener",
+    )
+    assert run_probe(pre_cups_udp, runner_pub).status == ProbeStatus.MET
+    assert run_probe(pre_cups_udp, runner_local).status == ProbeStatus.NOT_MET
+
+
+def test_package_probe_distinguishes_absent_from_ssh_failure():
+    runner_absent = MockRunner(
+        host_name="clean-host",
+        responses={
+            ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "cups-browsed"): CommandResult(
+                1, "", "dpkg-query: no packages found matching cups-browsed\n"
+            ),
+        },
+    )
+    pre = Precondition(
+        probe="package_installed_vulnerable",
+        params={"package": "cups-browsed", "fixed_version": "2.0.0-0ubuntu10.2"},
+        description="cups-browsed installed and < 2.0.0-0ubuntu10.2",
+        justification_if_not_met=VexJustification.COMPONENT_NOT_PRESENT,
+    )
+    res_absent = run_probe(pre, runner_absent)
+    assert res_absent.status == ProbeStatus.NOT_MET
+    assert "not installed" in res_absent.evidence.lower()
+
+    # Transport failure (e.g. SSH connection refused / timeout)
+    runner_ssh_err = MockRunner(
+        host_name="unreachable-host",
+        responses={
+            ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "cups-browsed"): CommandResult(
+                255, "", "ssh: connect to host unreachable-host port 22: Connection timed out", transport_error=True
+            ),
+        },
+    )
+    res_ssh_err = run_probe(pre, runner_ssh_err)
+    assert res_ssh_err.status == ProbeStatus.UNKNOWN
+
+
+def test_firewall_probe_permission_denied_yields_unknown():
+    runner_perm = MockRunner(
+        host_name="restricted-host",
+        responses={
+            ("ufw", "status"): CommandResult(1, "", "ERROR: You need to be root to run this script"),
+            ("nft", "list", "tables"): CommandResult(1, "", "Operation not permitted"),
+        },
+    )
+    pre = Precondition(
+        probe="firewall_allows_port",
+        params={"port": "any", "proto": "tcp"},
+        description="Host firewall allows incoming TCP connections",
+    )
+    res = run_probe(pre, runner_perm)
+    assert res.status == ProbeStatus.UNKNOWN
+
+    # Active UFW blocking incoming by default with no rules allowing external access
+    ufw_blocking = "Status: active\nDefault: deny (incoming), allow (outgoing), disabled (routed)\n"
+    runner_ufw_block = MockRunner(
+        host_name="laptop-ufw",
+        responses={
+            ("ufw", "status", "verbose"): CommandResult(0, ufw_blocking, ""),
+        },
+    )
+    res_block = run_probe(pre, runner_ufw_block)
+    assert res_block.status == ProbeStatus.NOT_MET
+    assert "deny (incoming)" in res_block.evidence
+
+
+def test_kernel_version_and_systemd_probes():
+    runner = MockRunner(
+        host_name="srv-01",
+        responses={
+            ("uname", "-r"): CommandResult(0, "6.8.0-40-generic\n", ""),
+            ("dpkg", "--compare-versions", "6.8.0-40", "lt", "6.8.0-45"): CommandResult(0, "", ""),
+            ("systemctl", "is-active", "cups-browsed.service"): CommandResult(3, "inactive\n", ""),
+        },
+    )
+    pre_kern = Precondition(
+        probe="kernel_version_vulnerable",
+        params={"fixed_version": "6.8.0-45"},
+        description="Kernel < 6.8.0-45",
+    )
+    assert run_probe(pre_kern, runner).status == ProbeStatus.MET
+
+    pre_svc = Precondition(
+        probe="systemd_service_active",
+        params={"service": "cups-browsed.service"},
+        description="cups-browsed.service is active",
+    )
+    assert run_probe(pre_svc, runner).status == ProbeStatus.NOT_MET
+
+
+def test_local_runner_executes_uname():
+    local = LocalRunner()
+    res = local.run(["uname", "-s"])
+    assert res.returncode == 0
+    assert "Linux" in res.stdout
+
+
+def test_review_fixes_dpkg_error_ufw_allow_and_invalid_port():
+    # 1. dpkg --compare-versions exit code 2 (syntax error) must yield UNKNOWN, not NOT_MET
+    runner_dpkg_err = MockRunner(
+        host_name="bad-ver-host",
+        responses={
+            ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "openssl"): CommandResult(
+                0, "ii \t3.0.2-0ubuntu1\n", ""
+            ),
+            ("dpkg", "--compare-versions", "3.0.2-0ubuntu1", "lt", "~~bad$$"): CommandResult(
+                2, "", "dpkg: warning: version '~~bad$$' has bad syntax"
+            ),
+        },
+    )
+    pre_pkg = Precondition(
+        probe="package_installed_vulnerable",
+        params={"package": "openssl", "fixed_version": "~~bad$$"},
+        description="openssl check",
+    )
+    assert run_probe(pre_pkg, runner_dpkg_err).status == ProbeStatus.UNKNOWN
+
+    # 2. ufw active with Default: allow (incoming) and no explicit rule lines -> MET
+    runner_ufw_allow = MockRunner(
+        host_name="open-ufw",
+        responses={
+            ("ufw", "status", "verbose"): CommandResult(
+                0,
+                "Status: active\nDefault: allow (incoming), deny (outgoing), disabled (routed)\n",
+                "",
+            )
+        },
+    )
+    pre_fw = Precondition(
+        probe="firewall_allows_port",
+        params={"port": "any", "proto": "tcp"},
+        description="firewall allows tcp",
+    )
+    assert run_probe(pre_fw, runner_ufw_allow).status == ProbeStatus.MET
+
+    # 3. Invalid non-numeric port parameter in network_listener -> UNKNOWN
+    runner_ss = MockRunner(
+        host_name="ss-host",
+        responses={
+            ("ss", "-tulpnH"): CommandResult(0, "tcp LISTEN 0 128 0.0.0.0:80 0.0.0.0:*\n", ""),
+        },
+    )
+    pre_bad_port = Precondition(
+        probe="network_listener",
+        params={"proto": "tcp", "port": "http_invalid", "scope": "non_loopback"},
+        description="invalid port",
+    )
+    assert run_probe(pre_bad_port, runner_ss).status == ProbeStatus.UNKNOWN
+

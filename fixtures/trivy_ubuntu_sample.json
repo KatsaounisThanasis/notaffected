@@ -1,0 +1,32 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "ubuntu-fleet-scan",
+  "Results": [
+    {
+      "Target": "ubuntu-24.04-rootfs",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2026-98432",
+          "PkgName": "linux-image-generic",
+          "InstalledVersion": "6.8.0-40.40",
+          "FixedVersion": "6.8.0-45.45",
+          "Severity": "CRITICAL"
+        },
+        {
+          "VulnerabilityID": "CVE-2024-47176",
+          "PkgName": "cups-browsed",
+          "InstalledVersion": "2.0.0-0ubuntu10.1",
+          "FixedVersion": "2.0.0-0ubuntu10.2",
+          "Severity": "CRITICAL"
+        },
+        {
+          "VulnerabilityID": "CVE-2022-47942",
+          "PkgName": "linux-image-generic",
+          "InstalledVersion": "6.8.0-40.40",
+          "FixedVersion": "6.8.0-45.45",
+          "Severity": "CRITICAL"
+        }
+      ]
+    }
+  ]
+}

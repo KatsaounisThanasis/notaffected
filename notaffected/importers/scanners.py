@@ -1,0 +1,100 @@
+"""Parsers for Trivy JSON and Grype JSON vulnerability scan reports."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+@dataclass(frozen=True)
+class ScannedFinding:
+    """A single CVE finding extracted from a scanner report."""
+
+    cve_id: str
+    package_name: str | None = None
+    installed_version: str | None = None
+    fixed_version: str | None = None
+    severity: str = "UNKNOWN"
+
+
+def parse_scanner_json(data: dict[str, Any] | str | Path) -> list[ScannedFinding]:
+    """Auto-detect and parse Trivy JSON or Grype JSON into deduplicated ScannedFindings."""
+    if isinstance(data, Path):
+        payload = json.loads(data.read_text(encoding="utf-8"))
+    elif isinstance(data, str):
+        path_candidate = Path(data)
+        if "\n" not in data and not data.lstrip().startswith("{") and path_candidate.is_file():
+            payload = json.loads(path_candidate.read_text(encoding="utf-8"))
+        else:
+            payload = json.loads(data)
+    elif isinstance(data, dict):
+        payload = data
+    else:
+        raise ValueError("Unsupported scanner input type")
+
+    findings: list[ScannedFinding] = []
+    seen: set[tuple[str, str | None]] = set()
+
+    # Trivy format (`Results[].Vulnerabilities[]`)
+    if "Results" in payload and isinstance(payload["Results"], list):
+        for res_block in payload["Results"]:
+            if not isinstance(res_block, dict):
+                continue
+            for vuln in res_block.get("Vulnerabilities") or []:
+                if not isinstance(vuln, dict):
+                    continue
+                cve = str(vuln.get("VulnerabilityID") or "").strip().upper()
+                if not cve.startswith("CVE-"):
+                    continue
+                pkg = vuln.get("PkgName")
+                key = (cve, pkg)
+                if key in seen:
+                    continue
+                seen.add(key)
+                findings.append(
+                    ScannedFinding(
+                        cve_id=cve,
+                        package_name=str(pkg) if pkg else None,
+                        installed_version=(
+                            str(vuln["InstalledVersion"]) if vuln.get("InstalledVersion") else None
+                        ),
+                        fixed_version=(
+                            str(vuln["FixedVersion"]) if vuln.get("FixedVersion") else None
+                        ),
+                        severity=str(vuln.get("Severity") or "UNKNOWN").upper(),
+                    )
+                )
+
+    # Grype format (`matches[].vulnerability` + `artifact`)
+    elif "matches" in payload and isinstance(payload["matches"], list):
+        for match in payload["matches"]:
+            if not isinstance(match, dict):
+                continue
+            vuln = match.get("vulnerability") or {}
+            artifact = match.get("artifact") or {}
+            cve = str(vuln.get("id") or "").strip().upper()
+            if not cve.startswith("CVE-"):
+                continue
+            pkg = artifact.get("name")
+            key = (cve, pkg)
+            if key in seen:
+                continue
+            seen.add(key)
+            fix_block = vuln.get("fix") or {}
+            fix_versions = fix_block.get("versions") or []
+            fixed_ver = str(fix_versions[0]) if fix_versions else None
+            findings.append(
+                ScannedFinding(
+                    cve_id=cve,
+                    package_name=str(pkg) if pkg else None,
+                    installed_version=(
+                        str(artifact["version"]) if artifact.get("version") else None
+                    ),
+                    fixed_version=fixed_ver,
+                    severity=str(vuln.get("severity") or "UNKNOWN").upper(),
+                )
+            )
+
+    return findings
