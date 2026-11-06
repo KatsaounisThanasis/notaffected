@@ -108,3 +108,67 @@ def test_fetcher_rejects_path_traversal_cve_id(tmp_path):
     assert fetch_osv_advisory("../secret", cache_dir=cache_dir) is None
     assert fetch_osv_advisory("CVE-2026-1234/../../secret", cache_dir=cache_dir) is None
 
+
+def test_kernel_path_mapping_and_ubuntu_osv_merge(monkeypatch):
+    from notaffected.advisories.extractor import KERNEL_PATH_TO_MODULE
+    from notaffected.advisories.fetcher import fetch_ubuntu_osv_advisory
+
+    assert KERNEL_PATH_TO_MODULE["fs/smb/server/"] == "ksmbd"
+    assert KERNEL_PATH_TO_MODULE["net/netfilter/"] == "nf_tables"
+
+    # Base OSV record mentions file path `fs/overlayfs/super.c` without naming module `overlay` directly
+    base_osv = {
+        "id": "CVE-2025-99999",
+        "summary": "Linux kernel race condition in fs/overlayfs/super.c",
+        "details": "A flaw in fs/overlayfs/super.c allows local privilege escalation.",
+        "affected": [],
+        "references": [
+            {"type": "FIX", "url": "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=abc"}
+        ],
+    }
+    ubuntu_osv = {
+        "id": "UBUNTU-CVE-2025-99999",
+        "affected": [
+            {
+                "package": {"name": "linux", "ecosystem": "Ubuntu:24.04:LTS"},
+                "ranges": [
+                    {
+                        "type": "ECOSYSTEM",
+                        "events": [{"introduced": "0"}, {"fixed": "6.8.0-52.53"}],
+                    }
+                ],
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "notaffected.advisories.extractor.fetch_osv_advisory",
+        lambda cve_id, cache_dir=None: base_osv,
+    )
+    monkeypatch.setattr(
+        "notaffected.advisories.extractor.fetch_ubuntu_osv_advisory",
+        lambda cve_id, cache_dir=None: ubuntu_osv,
+    )
+
+    spec = resolve_check_spec("CVE-2025-99999", use_llm=False)
+    assert spec.patch.fixed_version == "6.8.0-52.53"
+    assert spec.patch.pocket == "Ubuntu:24.04:LTS"
+    mod_probes = [p for p in spec.preconditions if p.probe == "kernel_module_loaded"]
+    assert len(mod_probes) == 1
+    assert mod_probes[0].params["module"] == "overlay"
+    assert spec.confidence == "high"
+    assert callable(fetch_ubuntu_osv_advisory)
+
+    # Verify 'nftables' prose maps to actual kernel module 'nf_tables'
+    nft_osv = {
+        "id": "CVE-2025-88888",
+        "summary": "Linux kernel nftables out-of-bounds write",
+        "details": "Flaw in net/netfilter/nf_tables_api.c in nftables subsystem.",
+        "affected": [],
+    }
+    nft_spec = extract_from_osv_payload("CVE-2025-88888", nft_osv, use_llm=False)
+    nft_mods = [p.params["module"] for p in nft_spec.preconditions if p.probe == "kernel_module_loaded"]
+    assert nft_mods == ["nf_tables"]
+
+
+

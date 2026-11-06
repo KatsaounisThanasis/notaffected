@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from notaffected.advisories.builtin_specs import BUILTIN_SPECS
-from notaffected.advisories.fetcher import fetch_osv_advisory
+from notaffected.advisories.fetcher import fetch_osv_advisory, fetch_ubuntu_osv_advisory
 from notaffected.local_model import generate_json
 from notaffected.model import (
     PROBE_TYPES,
@@ -23,7 +23,6 @@ from notaffected.model import (
 KNOWN_KERNEL_MODULES = (
     "ksmbd",
     "nf_tables",
-    "nftables",
     "bluetooth",
     "rds",
     "tipc",
@@ -34,6 +33,24 @@ KNOWN_KERNEL_MODULES = (
     "mptcp_diag",
 )
 
+KERNEL_ALIAS_TO_MODULE: dict[str, str] = {
+    "nftables": "nf_tables",
+}
+
+KERNEL_PATH_TO_MODULE: dict[str, str] = {
+    "fs/smb/server/": "ksmbd",
+    "net/netfilter/": "nf_tables",
+    "net/bluetooth/": "bluetooth",
+    "drivers/bluetooth/": "bluetooth",
+    "fs/overlayfs/": "overlay",
+    "net/rds/": "rds",
+    "net/tipc/": "tipc",
+    "net/sctp/": "sctp",
+    "net/can/": "can",
+    "drivers/usb/storage/": "usb_storage",
+    "net/mptcp/": "mptcp_diag",
+}
+
 
 def resolve_check_spec(
     cve_id: str,
@@ -42,12 +59,25 @@ def resolve_check_spec(
     package_hint: str | None = None,
     fixed_version_hint: str | None = None,
 ) -> CheckSpec:
-    """Resolve a CheckSpec for `cve_id`: built-in golden spec first, then OSV + heuristics/LLM."""
+    """Resolve a CheckSpec for `cve_id`: built-in golden spec first, then OSV + Ubuntu OSV + heuristics/LLM."""
     norm_id = cve_id.strip().upper()
     if norm_id in BUILTIN_SPECS:
         return BUILTIN_SPECS[norm_id]
 
     osv_data = fetch_osv_advisory(norm_id, cache_dir=cache_dir)
+    ubuntu_osv = fetch_ubuntu_osv_advisory(norm_id, cache_dir=cache_dir)
+    if osv_data and ubuntu_osv:
+        merged = dict(osv_data)
+        merged["affected"] = list(osv_data.get("affected") or []) + list(
+            ubuntu_osv.get("affected") or []
+        )
+        for field_key in ("summary", "details", "references", "database_specific"):
+            if not merged.get(field_key) and ubuntu_osv.get(field_key):
+                merged[field_key] = ubuntu_osv[field_key]
+        osv_data = merged
+    elif ubuntu_osv and not osv_data:
+        osv_data = ubuntu_osv
+
     if osv_data:
         return extract_from_osv_payload(
             norm_id,
@@ -141,20 +171,33 @@ def extract_from_osv_payload(
             )
         )
 
-    # Deterministic heuristic extraction for kernel modules and ports
+    # Deterministic heuristic extraction for kernel modules (by name, alias, or kernel source path)
     text_lower = full_text.lower()
+    detected_module: str | None = None
     for mod in KNOWN_KERNEL_MODULES:
         if re.search(rf"\b{re.escape(mod)}\b", text_lower):
-            preconditions.append(
-                Precondition(
-                    probe="kernel_module_loaded",
-                    params={"module": mod},
-                    description=f"Kernel module '{mod}' is loaded",
-                    justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
-                )
-            )
-            mitigation.append(f"sudo modprobe -r {mod}")
+            detected_module = mod
             break
+    if not detected_module:
+        for alias, canonical_mod in KERNEL_ALIAS_TO_MODULE.items():
+            if re.search(rf"\b{re.escape(alias)}\b", text_lower):
+                detected_module = canonical_mod
+                break
+    if not detected_module:
+        for path_prefix, mapped_mod in KERNEL_PATH_TO_MODULE.items():
+            if path_prefix in text_lower:
+                detected_module = mapped_mod
+                break
+    if detected_module:
+        preconditions.append(
+            Precondition(
+                probe="kernel_module_loaded",
+                params={"module": detected_module},
+                description=f"Kernel module '{detected_module}' is loaded",
+                justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+            )
+        )
+        mitigation.append(f"sudo modprobe -r {detected_module}")
 
     port_match = re.search(r"\b(tcp|udp)\s+port\s+(\d{1,5})\b", text_lower)
     if port_match:
@@ -173,9 +216,9 @@ def extract_from_osv_payload(
     source = "osv"
     if use_llm:
         llm_pres, llm_mitigations = _extract_via_llm(cve_id, full_text)
-        existing_probes = {(p.probe, json.dumps(p.params, sort_keys=True)) for p in preconditions}
+        existing_probes = {_precondition_dedup_key(p) for p in preconditions}
         for lp in llm_pres:
-            key = (lp.probe, json.dumps(lp.params, sort_keys=True))
+            key = _precondition_dedup_key(lp)
             if key not in existing_probes:
                 preconditions.append(lp)
                 existing_probes.add(key)
@@ -220,6 +263,13 @@ def extract_from_osv_payload(
         confidence=confidence,
         source=source,
     )
+
+
+def _precondition_dedup_key(pre: Precondition) -> tuple[str, str]:
+    params = dict(pre.params)
+    if pre.probe == "kernel_module_loaded" and "module" in params:
+        params["module"] = str(params["module"]).replace("-", "_")
+    return (pre.probe, json.dumps(params, sort_keys=True))
 
 
 def _extract_package_and_fix(

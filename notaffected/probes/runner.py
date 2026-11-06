@@ -130,6 +130,148 @@ class SSHRunner:
             )
 
 
+class DockerRunner:
+    """Executes read-only probe commands inside a running Docker container (`docker exec`)."""
+
+    def __init__(
+        self,
+        container: str,
+        host_name: str | None = None,
+        timeout: int = 10,
+    ) -> None:
+        self.container = container
+        self.host_name = host_name or f"docker:{container}"
+        self.timeout = timeout
+
+    def run(self, argv: list[str]) -> CommandResult:
+        if not self.container or self.container.startswith("-"):
+            return CommandResult(
+                returncode=255,
+                stdout="",
+                stderr=f"Invalid Docker container identifier: {self.container!r}",
+                transport_error=True,
+            )
+        docker_argv = ["docker", "exec", "--", self.container, *argv]
+        try:
+            proc = subprocess.run(
+                docker_argv,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                shell=False,
+                check=False,
+            )
+            stderr_lower = (proc.stderr or "").lower()
+            is_daemon_err = proc.returncode == 125 or (
+                proc.returncode != 0
+                and any(
+                    phrase in stderr_lower
+                    for phrase in (
+                        "error response from daemon",
+                        "oci runtime",
+                        "no such container",
+                        "is not running",
+                        "cannot connect to the docker daemon",
+                        "permission denied while trying to connect",
+                    )
+                )
+            )
+            return CommandResult(
+                returncode=proc.returncode,
+                stdout=proc.stdout or "",
+                stderr=proc.stderr or "",
+                transport_error=is_daemon_err,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return CommandResult(
+                returncode=255,
+                stdout="",
+                stderr=str(exc),
+                transport_error=True,
+            )
+
+
+class K8sRunner:
+    """Executes read-only probe commands inside a Kubernetes pod (`kubectl exec`)."""
+
+    def __init__(
+        self,
+        pod: str,
+        namespace: str | None = None,
+        container: str | None = None,
+        host_name: str | None = None,
+        timeout: int = 10,
+    ) -> None:
+        if namespace is None and "/" in pod:
+            ns_part, pod_part = pod.split("/", 1)
+            self.namespace: str | None = ns_part
+            self.pod = pod_part
+        else:
+            self.namespace = namespace
+            self.pod = pod
+        self.container = container
+        default_label = f"k8s:{self.namespace}/{self.pod}" if self.namespace else f"k8s:{self.pod}"
+        self.host_name = host_name or default_label
+        self.timeout = timeout
+
+    def run(self, argv: list[str]) -> CommandResult:
+        if (
+            not self.pod
+            or self.pod.startswith("-")
+            or (self.namespace and self.namespace.startswith("-"))
+            or (self.container and self.container.startswith("-"))
+        ):
+            return CommandResult(
+                returncode=255,
+                stdout="",
+                stderr=f"Invalid Kubernetes pod/namespace identifier: {self.pod!r}",
+                transport_error=True,
+            )
+        k_argv = ["kubectl", "exec"]
+        if self.namespace:
+            k_argv.extend(["-n", self.namespace])
+        if self.container:
+            k_argv.extend(["-c", self.container])
+        k_argv.extend([self.pod, "--", *argv])
+        try:
+            proc = subprocess.run(
+                k_argv,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                shell=False,
+                check=False,
+            )
+            stderr_lower = (proc.stderr or "").lower()
+            is_k8s_err = proc.returncode != 0 and any(
+                phrase in stderr_lower
+                for phrase in (
+                    "error from server",
+                    "error:",
+                    "unable to connect to the server",
+                    "unable to upgrade connection",
+                    "the connection to the server",
+                    "forbidden",
+                    "container not found",
+                    "pod does not exist",
+                )
+            )
+            return CommandResult(
+                returncode=proc.returncode,
+                stdout=proc.stdout or "",
+                stderr=proc.stderr or "",
+                transport_error=is_k8s_err,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return CommandResult(
+                returncode=255,
+                stdout="",
+                stderr=str(exc),
+                transport_error=True,
+            )
+
+
+
 class MockRunner:
     """Deterministic in-memory runner for unit and golden fleet tests."""
 

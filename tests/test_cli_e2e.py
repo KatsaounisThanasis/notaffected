@@ -104,6 +104,28 @@ def test_inventory_yaml_loader(tmp_path: Path):
     assert runners[1].host_name == "web-01"
 
 
+def test_inventory_docker_and_k8s_entries(tmp_path: Path):
+    inv_file = tmp_path / "containers.yml"
+    inv_file.write_text(
+        "hosts:\n"
+        "  - name: api-container\n"
+        "    docker: api-v1\n"
+        "  - name: worker-pod\n"
+        "    k8s: payments/worker-0\n",
+        encoding="utf-8",
+    )
+    runners = load_runners(
+        host=None,
+        ssh_targets=None,
+        docker_targets=["redis-local"],
+        k8s_targets=["default/web-pod"],
+        inventory_path=inv_file,
+    )
+    names = [r.host_name for r in runners]
+    assert names == ["api-container", "worker-pod", "docker:redis-local", "k8s:default/web-pod"]
+
+
+
 def test_cli_spec_check_and_filter_live_local(tmp_path: Path):
     # 1. `notaffected spec CVE-2026-98432`
     rc_spec = main(["spec", "CVE-2026-98432"])
@@ -132,9 +154,10 @@ def test_cli_spec_check_and_filter_live_local(tmp_path: Path):
     # ksmbd is not loaded on this workstation, so it must be deterministically not_affected!
     assert vex_doc["statements"][0]["status"] == "not_affected"
 
-    # 3. `notaffected filter fixtures/trivy_ubuntu_sample.json --host local --emit-vex ...`
+    # 3. `notaffected filter fixtures/trivy_ubuntu_sample.json --host local --emit-vex ... --html ...`
     fixture_path = Path(__file__).resolve().parent.parent / "fixtures" / "trivy_ubuntu_sample.json"
     vex_filter_path = tmp_path / "filtered.vex.json"
+    html_filter_path = tmp_path / "filtered.report.html"
     rc_filter = main(
         [
             "filter",
@@ -143,8 +166,12 @@ def test_cli_spec_check_and_filter_live_local(tmp_path: Path):
             "local",
             "--emit-vex",
             str(vex_filter_path),
+            "--html",
+            str(html_filter_path),
         ]
     )
     assert rc_filter == 0
     filtered_vex = json.loads(vex_filter_path.read_text(encoding="utf-8"))
     assert len(filtered_vex["statements"]) == 3
+    assert html_filter_path.is_file()
+    assert "<!DOCTYPE html>" in html_filter_path.read_text(encoding="utf-8")

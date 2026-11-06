@@ -46,3 +46,20 @@ def fetch_osv_advisory(
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return None
     return None
+
+
+def fetch_ubuntu_osv_advisory(
+    cve_id: str,
+    cache_dir: Path | None = None,
+    timeout: int = 8,
+) -> dict[str, Any] | None:
+    """Fetch Ubuntu-specific OSV record (`UBUNTU-CVE-...`) for `cve_id`."""
+    norm_id = cve_id.strip().upper()
+    if norm_id.startswith("CVE-"):
+        ubuntu_id = f"UBUNTU-{norm_id}"
+    elif norm_id.startswith("UBUNTU-CVE-"):
+        ubuntu_id = norm_id
+    else:
+        return None
+    return fetch_osv_advisory(ubuntu_id, cache_dir=cache_dir, timeout=timeout)
+

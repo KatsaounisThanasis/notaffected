@@ -161,7 +161,8 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
         )
 
     if res.returncode != 0:
-        if "no packages found" in res.stderr.lower() or res.returncode == 1:
+        stderr_lower = res.stderr.lower()
+        if "no packages found" in stderr_lower or (res.returncode == 1 and not stderr_lower.strip()):
             return ProbeResult(
                 precondition=pre,
                 status=ProbeStatus.NOT_MET,

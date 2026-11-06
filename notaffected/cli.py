@@ -14,6 +14,7 @@ from notaffected.importers.scanners import parse_scanner_json
 from notaffected.inventory import load_demo_fleet, load_runners
 from notaffected.model import CheckSpec
 from notaffected.render.console import render_spec, render_verdicts
+from notaffected.render.html import write_html_report
 from notaffected.render.json_out import write_json_report
 from notaffected.render.vex import write_openvex
 
@@ -78,6 +79,20 @@ def _add_target_and_output_args(p: argparse.ArgumentParser) -> None:
         help="Remote SSH target (user@host); may be passed multiple times",
     )
     p.add_argument(
+        "--docker",
+        action="append",
+        dest="docker_targets",
+        default=None,
+        help="Running Docker container name/ID to probe via 'docker exec'",
+    )
+    p.add_argument(
+        "--k8s",
+        action="append",
+        dest="k8s_targets",
+        default=None,
+        help="Kubernetes pod ('pod' or 'namespace/pod') to probe via 'kubectl exec'",
+    )
+    p.add_argument(
         "-i",
         "--inventory",
         type=Path,
@@ -101,6 +116,13 @@ def _add_target_and_output_args(p: argparse.ArgumentParser) -> None:
         type=Path,
         default=None,
         help="Write full audit report (specs + verdicts + probe evidence) to JSON file",
+    )
+    p.add_argument(
+        "--html",
+        dest="html_out",
+        type=Path,
+        default=None,
+        help="Write standalone interactive HTML report to this file",
     )
     p.add_argument(
         "--llm",
@@ -153,6 +175,8 @@ def main(argv: list[str] | None = None) -> int:
         runners = load_runners(
             host=args.host,
             ssh_targets=args.ssh_targets,
+            docker_targets=args.docker_targets,
+            k8s_targets=args.k8s_targets,
             inventory_path=args.inventory,
         )
     verdicts = evaluate_fleet(specs, runners)
@@ -169,6 +193,12 @@ def main(argv: list[str] | None = None) -> int:
         write_json_report(specs, verdicts, args.json_out)
         console.print(
             f"[bold cyan]JSON audit report written to:[/bold cyan] {args.json_out}"
+        )
+
+    if args.html_out:
+        write_html_report(specs, verdicts, args.html_out)
+        console.print(
+            f"[bold cyan]Standalone HTML report written to:[/bold cyan] {args.html_out}"
         )
 
     if args.fail_on_affected and any(v.status.value == "affected" for v in verdicts):

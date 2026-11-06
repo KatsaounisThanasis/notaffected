@@ -238,3 +238,53 @@ def test_review_fixes_dpkg_error_ufw_allow_and_invalid_port():
     )
     assert run_probe(pre_bad_port, runner_ss).status == ProbeStatus.UNKNOWN
 
+
+def test_docker_and_k8s_runner_transport_errors(monkeypatch):
+    import subprocess
+
+    from notaffected.probes.runner import DockerRunner, K8sRunner
+
+    def fake_run_missing_container(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=1,
+            stdout="",
+            stderr="Error response from daemon: No such container: ghost-container",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run_missing_container)
+    d_runner = DockerRunner(container="ghost-container")
+    d_res = d_runner.run(["uname", "-r"])
+    assert d_res.transport_error is True
+
+    def fake_run_missing_pod(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=1,
+            stdout="",
+            stderr='Error from server (NotFound): pods "ghost-pod" not found',
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run_missing_pod)
+    k_runner = K8sRunner(pod="ghost-pod", namespace="prod")
+    k_res = k_runner.run(["uname", "-r"])
+    assert k_res.transport_error is True
+
+    # Lowercase `error: ...` from kubectl exec (returncode 1) + option injection guard (`-` prefix)
+    def fake_run_kubectl_completed_pod(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=1,
+            stdout="",
+            stderr="error: cannot exec into a container in a completed pod; current phase is Succeeded",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run_kubectl_completed_pod)
+    k_res2 = k_runner.run(["dpkg-query", "-W", "openssl"])
+    assert k_res2.transport_error is True
+
+    bad_k8s = K8sRunner(pod="--kubeconfig=/tmp/evil")
+    assert bad_k8s.run(["uname", "-r"]).transport_error is True
+
+
+

@@ -6,7 +6,15 @@ from pathlib import Path
 
 import yaml
 
-from notaffected.probes.runner import CommandResult, HostRunner, LocalRunner, MockRunner, SSHRunner
+from notaffected.probes.runner import (
+    CommandResult,
+    DockerRunner,
+    HostRunner,
+    K8sRunner,
+    LocalRunner,
+    MockRunner,
+    SSHRunner,
+)
 
 
 def load_demo_fleet() -> list[HostRunner]:
@@ -89,6 +97,8 @@ def load_demo_fleet() -> list[HostRunner]:
 def load_runners(
     host: str | None = None,
     ssh_targets: list[str] | None = None,
+    docker_targets: list[str] | None = None,
+    k8s_targets: list[str] | None = None,
     inventory_path: Path | None = None,
     timeout: int = 10,
 ) -> list[HostRunner]:
@@ -110,12 +120,46 @@ def load_runners(
                     else:
                         runners.append(SSHRunner(target=entry, timeout=timeout))
                 elif isinstance(entry, dict):
-                    name = str(entry.get("name") or entry.get("ssh") or entry.get("host") or "host")
+                    name = str(
+                        entry.get("name")
+                        or entry.get("ssh")
+                        or entry.get("docker")
+                        or entry.get("k8s")
+                        or entry.get("host")
+                        or "host"
+                    )
                     etype = str(entry.get("type") or "").lower()
                     ssh_dest = entry.get("ssh") or entry.get("host")
-                    port = int(entry["port"]) if entry.get("port") else None
+                    docker_dest = entry.get("docker")
+                    k8s_dest = entry.get("k8s")
+                    port: int | None = None
+                    if entry.get("port") is not None:
+                        try:
+                            port = int(entry["port"])
+                        except (ValueError, TypeError) as exc:
+                            raise ValueError(
+                                f"Invalid SSH port in inventory for {name}: {entry['port']!r}"
+                            ) from exc
                     if etype == "local" or ssh_dest in ("local", "localhost"):
                         runners.append(LocalRunner(host_name=name, timeout=timeout))
+                    elif docker_dest:
+                        runners.append(
+                            DockerRunner(
+                                container=str(docker_dest),
+                                host_name=name,
+                                timeout=timeout,
+                            )
+                        )
+                    elif k8s_dest:
+                        runners.append(
+                            K8sRunner(
+                                pod=str(k8s_dest),
+                                namespace=entry.get("namespace"),
+                                container=entry.get("container"),
+                                host_name=name,
+                                timeout=timeout,
+                            )
+                        )
                     elif ssh_dest:
                         runners.append(
                             SSHRunner(
@@ -140,6 +184,14 @@ def load_runners(
     if ssh_targets:
         for target in ssh_targets:
             runners.append(SSHRunner(target=target, timeout=timeout))
+
+    if docker_targets:
+        for container in docker_targets:
+            runners.append(DockerRunner(container=container, timeout=timeout))
+
+    if k8s_targets:
+        for pod_spec in k8s_targets:
+            runners.append(K8sRunner(pod=pod_spec, timeout=timeout))
 
     if host:
         if host in ("local", "localhost"):

@@ -106,3 +106,34 @@ def test_console_renderers_produce_clean_english_output():
     assert "edge-api-01" in out
     assert "laptop-01" in out
     assert "noble-proposed" in out
+
+
+def test_html_report_generation_and_xss_escaping():
+    from notaffected.render.html import build_html_report
+
+    spec = BUILTIN_SPECS["CVE-2026-98432"]
+    verdicts = _sample_verdicts()
+    # Add a verdict with untrusted HTML/JS in reason to verify XSS escaping
+    verdicts.append(
+        HostVerdict(
+            host="xss-host<script>alert(1)</script>",
+            cve_id="CVE-2026-98432",
+            status=VerdictStatus.UNDER_INVESTIGATION,
+            reason="Output: <img src=x onerror=alert(1)>",
+            justification=None,
+        )
+    )
+
+    html_doc = build_html_report([spec], verdicts)
+    assert "<!DOCTYPE html>" in html_doc
+    assert "CVE-2026-98432" in html_doc
+    assert "edge-api-01" in html_doc
+    assert "laptop-01" in html_doc
+    # No external CDN stylesheets or scripts
+    assert "https://cdn." not in html_doc
+    assert "https://unpkg." not in html_doc
+    # Untrusted tags are HTML-escaped
+    assert "<script>alert(1)</script>" not in html_doc
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html_doc
+    assert "&lt;img src=x onerror=alert(1)&gt;" in html_doc
+
