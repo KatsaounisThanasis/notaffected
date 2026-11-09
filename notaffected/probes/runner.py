@@ -38,8 +38,17 @@ class LocalRunner:
     def __init__(self, host_name: str | None = None, timeout: int = 10) -> None:
         self.host_name = host_name or socket.gethostname() or "localhost"
         self.timeout = timeout
+        self._cache: dict[tuple[str, ...], CommandResult] = {}
 
     def run(self, argv: list[str]) -> CommandResult:
+        key = tuple(argv)
+        if key in self._cache:
+            return self._cache[key]
+        res = self._run_uncached(argv)
+        self._cache[key] = res
+        return res
+
+    def _run_uncached(self, argv: list[str]) -> CommandResult:
         try:
             proc = subprocess.run(
                 argv,
@@ -92,8 +101,17 @@ class SSHRunner:
         self.host_name = host_name or target
         self.timeout = timeout
         self.port = port
+        self._cache: dict[tuple[str, ...], CommandResult] = {}
 
     def run(self, argv: list[str]) -> CommandResult:
+        key = tuple(argv)
+        if key in self._cache:
+            return self._cache[key]
+        res = self._run_uncached(argv)
+        self._cache[key] = res
+        return res
+
+    def _run_uncached(self, argv: list[str]) -> CommandResult:
         remote_cmd = shlex.join(argv)
         ssh_argv = [
             "ssh",
@@ -142,8 +160,17 @@ class DockerRunner:
         self.container = container
         self.host_name = host_name or f"docker:{container}"
         self.timeout = timeout
+        self._cache: dict[tuple[str, ...], CommandResult] = {}
 
     def run(self, argv: list[str]) -> CommandResult:
+        key = tuple(argv)
+        if key in self._cache:
+            return self._cache[key]
+        res = self._run_uncached(argv)
+        self._cache[key] = res
+        return res
+
+    def _run_uncached(self, argv: list[str]) -> CommandResult:
         if not self.container or self.container.startswith("-"):
             return CommandResult(
                 returncode=255,
@@ -213,8 +240,17 @@ class K8sRunner:
         default_label = f"k8s:{self.namespace}/{self.pod}" if self.namespace else f"k8s:{self.pod}"
         self.host_name = host_name or default_label
         self.timeout = timeout
+        self._cache: dict[tuple[str, ...], CommandResult] = {}
 
     def run(self, argv: list[str]) -> CommandResult:
+        key = tuple(argv)
+        if key in self._cache:
+            return self._cache[key]
+        res = self._run_uncached(argv)
+        self._cache[key] = res
+        return res
+
+    def _run_uncached(self, argv: list[str]) -> CommandResult:
         if (
             not self.pod
             or self.pod.startswith("-")

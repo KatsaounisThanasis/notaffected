@@ -155,4 +155,51 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         confidence="high",
         source="builtin",
     ),
+    "CVE-2024-6387": CheckSpec(
+        cve_id="CVE-2024-6387",
+        summary="OpenSSH server (sshd) regreSSHion SIGALRM race condition unauthenticated RCE",
+        severity="CRITICAL",
+        preconditions=[
+            Precondition(
+                probe="package_installed_vulnerable",
+                params={"package": "openssh-server", "fixed_version": "1:9.6p1-3ubuntu13.3"},
+                description="Package 'openssh-server' is installed and < 1:9.6p1-3ubuntu13.3",
+                justification_if_not_met=VexJustification.COMPONENT_NOT_PRESENT,
+            ),
+            Precondition(
+                probe="process_running",
+                params={"process": "sshd"},
+                description="OpenSSH daemon ('sshd') process is running",
+                justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+            ),
+            Precondition(
+                probe="network_listener",
+                params={"proto": "tcp", "port": 22, "scope": "non_loopback"},
+                description="TCP port 22 (SSH) is listening on a non-loopback address",
+                justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+            ),
+            Precondition(
+                probe="config_contains",
+                params={
+                    "path": "/etc/ssh/sshd_config",
+                    "pattern": r"^\s*LoginGraceTime\s+0\b",
+                    "negate": True,
+                },
+                description="LoginGraceTime is not set to 0 in /etc/ssh/sshd_config",
+                justification_if_not_met=VexJustification.INLINE_MITIGATIONS_ALREADY_EXIST,
+            ),
+        ],
+        mitigation=[
+            "echo 'LoginGraceTime 0' | sudo tee -a /etc/ssh/sshd_config && sudo systemctl reload ssh",
+            "sudo apt update && sudo apt install --only-upgrade openssh-server",
+        ],
+        patch=PatchInfo(
+            status="released",
+            fixed_version="1:9.6p1-3ubuntu13.3",
+            pocket="noble-security",
+            advisory_url="https://ubuntu.com/security/CVE-2024-6387",
+        ),
+        confidence="high",
+        source="builtin",
+    ),
 }

@@ -48,6 +48,8 @@ PROBE_TYPES: frozenset[str] = frozenset(
         "network_listener",
         "firewall_allows_port",
         "systemd_service_active",
+        "process_running",
+        "config_contains",
     }
 )
 

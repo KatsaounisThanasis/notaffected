@@ -287,4 +287,184 @@ def test_docker_and_k8s_runner_transport_errors(monkeypatch):
     assert bad_k8s.run(["uname", "-r"]).transport_error is True
 
 
+def test_runner_caches_identical_commands(monkeypatch):
+    import subprocess
+
+    call_count = 0
+
+    def counting_run(argv, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="6.8.0-45-generic\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", counting_run)
+    runner = LocalRunner(host_name="cache-test")
+    r1 = runner.run(["uname", "-r"])
+    r2 = runner.run(["uname", "-r"])
+    r3 = runner.run(["uname", "-r"])
+    assert r1.stdout == r2.stdout == r3.stdout == "6.8.0-45-generic\n"
+    assert call_count == 1
+
+
+def test_config_contains_and_process_running_probes():
+    ps_output = (
+        "systemd         /sbin/init\n"
+        "sshd            sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups\n"
+        "nginx           nginx: master process /usr/sbin/nginx\n"
+    )
+    sshd_config_commented = (
+        "# OpenSSH server config\n"
+        "#PermitRootLogin yes\n"
+        "LoginGraceTime 0\n"
+    )
+    sshd_config_vulnerable = (
+        "# OpenSSH server config\n"
+        "PermitRootLogin yes\n"
+        "LoginGraceTime 120\n"
+    )
+    runner = MockRunner(
+        host_name="app-node",
+        responses={
+            ("ps", "-eo", "comm,args", "--no-headers"): CommandResult(0, ps_output, ""),
+            ("cat", "/etc/ssh/sshd_config"): CommandResult(0, sshd_config_commented, ""),
+            ("cat", "/etc/ssh/sshd_config_vuln"): CommandResult(0, sshd_config_vulnerable, ""),
+            ("cat", "/etc/shadow"): CommandResult(1, "", "cat: /etc/shadow: Permission denied"),
+        },
+    )
+
+    # 1. process_running
+    p_sshd = Precondition("process_running", {"process": "sshd"}, "sshd process running")
+    assert run_probe(p_sshd, runner).status == ProbeStatus.MET
+
+    p_redis = Precondition("process_running", {"process": "redis-server"}, "redis running")
+    assert run_probe(p_redis, runner).status == ProbeStatus.NOT_MET
+
+    # 2. config_contains ignores commented-out `#PermitRootLogin yes`
+    p_root_login = Precondition(
+        "config_contains",
+        {"path": "/etc/ssh/sshd_config", "pattern": r"^\s*PermitRootLogin\s+yes\b"},
+        "PermitRootLogin enabled",
+    )
+    assert run_probe(p_root_login, runner).status == ProbeStatus.NOT_MET
+
+    p_root_vuln = Precondition(
+        "config_contains",
+        {"path": "/etc/ssh/sshd_config_vuln", "pattern": r"^\s*PermitRootLogin\s+yes\b"},
+        "PermitRootLogin enabled",
+    )
+    assert run_probe(p_root_vuln, runner).status == ProbeStatus.MET
+
+    # 3. config_contains with `negate=True` (e.g. LoginGraceTime 0 mitigates CVE-2024-6387)
+    p_grace = Precondition(
+        "config_contains",
+        {"path": "/etc/ssh/sshd_config", "pattern": r"^\s*LoginGraceTime\s+0\b", "negate": True},
+        "LoginGraceTime is not set to 0",
+        justification_if_not_met=VexJustification.INLINE_MITIGATIONS_ALREADY_EXIST,
+    )
+    assert run_probe(p_grace, runner).status == ProbeStatus.NOT_MET
+
+    # 4. Path traversal or disallowed directory -> UNKNOWN
+    p_traversal = Precondition(
+        "config_contains",
+        {"path": "/etc/../root/.bashrc", "pattern": "export"},
+        "traversal attempt",
+    )
+    assert run_probe(p_traversal, runner).status == ProbeStatus.UNKNOWN
+
+    # 5. Permission denied -> UNKNOWN (never NOT_MET)
+    p_perm = Precondition(
+        "config_contains",
+        {"path": "/etc/shadow", "pattern": "root"},
+        "unreadable config",
+    )
+    assert run_probe(p_perm, runner).status == ProbeStatus.UNKNOWN
+
+    # 6. String "false" for negate and inline `#` comment stripping
+    sshd_inline_comment = "PermitRootLogin no # PermitRootLogin yes\n"
+    runner_inline = MockRunner(
+        host_name="inline-node",
+        responses={("cat", "/etc/ssh/sshd_config"): CommandResult(0, sshd_inline_comment, "")},
+    )
+    p_inline = Precondition(
+        "config_contains",
+        {"path": "/etc/ssh/sshd_config", "pattern": r"PermitRootLogin\s+yes", "negate": "false"},
+        "inline comment should not match",
+    )
+    assert run_probe(p_inline, runner_inline).status == ProbeStatus.NOT_MET
+
+
+
+def test_live_apt_policy_patch_tracker():
+    from notaffected.advisories.builtin_specs import BUILTIN_SPECS
+    from notaffected.probes.patch_tracker import resolve_host_patch_info
+
+    cups_spec = BUILTIN_SPECS["CVE-2024-47176"]
+    apt_policy_ready = (
+        "cups-browsed:\n"
+        "  Installed: 2.0.0-0ubuntu10.1\n"
+        "  Candidate: 2.0.0-0ubuntu10.3\n"
+        "  Version table:\n"
+        "     2.0.0-0ubuntu10.3 500\n"
+        "        500 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages\n"
+        " *** 2.0.0-0ubuntu10.1 100\n"
+        "        100 /var/lib/dpkg/status\n"
+    )
+    runner_ready = MockRunner(
+        host_name="srv-ready",
+        responses={
+            ("apt-cache", "policy", "cups-browsed"): CommandResult(0, apt_policy_ready, ""),
+            ("dpkg", "--compare-versions", "2.0.0-0ubuntu10.3", "ge", "2.0.0-0ubuntu10.2"): CommandResult(0, "", ""),
+        },
+    )
+    patch_ready = resolve_host_patch_info(cups_spec, runner_ready)
+    assert "available-in-apt" in patch_ready.status
+    assert "2.0.0-0ubuntu10.3" in patch_ready.status
+    assert patch_ready.pocket == "noble-security"
+
+    # Candidate is still older than fixed_version (e.g. fix is in -proposed, not enabled on host)
+    # Also verify that an unpinned -backports stanza above the Candidate stanza does not hijack pocket
+    kern_spec = BUILTIN_SPECS["CVE-2026-98432"]
+    apt_policy_multi_stanza = (
+        "linux-image-generic:\n"
+        "  Installed: 6.8.0-40.40\n"
+        "  Candidate: 6.8.0-45.45\n"
+        "  Version table:\n"
+        "     6.8.0-99.99 100\n"
+        "        100 http://archive.ubuntu.com/ubuntu noble-backports/main amd64 Packages\n"
+        "     6.8.0-45.45 500\n"
+        "        500 http://security.ubuntu.com/ubuntu noble-security/main amd64 Packages\n"
+        " *** 6.8.0-40.40 500\n"
+        "        500 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages\n"
+    )
+    runner_stanza = MockRunner(
+        host_name="srv-stanza",
+        responses={
+            ("apt-cache", "policy", "linux-image-generic"): CommandResult(0, apt_policy_multi_stanza, ""),
+            ("dpkg", "--compare-versions", "6.8.0-45.45", "ge", "6.8.0-45.45"): CommandResult(0, "", ""),
+        },
+    )
+    patch_stanza = resolve_host_patch_info(kern_spec, runner_stanza)
+    assert patch_stanza.pocket == "noble-security"
+    apt_policy_pending = (
+        "linux-image-generic:\n"
+        "  Installed: 6.8.0-40.40\n"
+        "  Candidate: 6.8.0-40.40\n"
+        "  Version table:\n"
+        " *** 6.8.0-40.40 500\n"
+        "        500 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages\n"
+    )
+    runner_pending = MockRunner(
+        host_name="srv-pending",
+        responses={
+            ("apt-cache", "policy", "linux-image-generic"): CommandResult(0, apt_policy_pending, ""),
+            ("dpkg", "--compare-versions", "6.8.0-40.40", "ge", "6.8.0-45.45"): CommandResult(1, "", ""),
+        },
+    )
+    patch_pending = resolve_host_patch_info(kern_spec, runner_pending)
+    assert "not-yet-in-apt" in patch_pending.status
+
+
+
+
+
 

@@ -16,6 +16,7 @@ from notaffected.model import (
     ProbeStatus,
     VerdictStatus,
 )
+from notaffected.probes.patch_tracker import resolve_host_patch_info
 from notaffected.probes.primitives import run_probe
 from notaffected.probes.runner import HostRunner
 
@@ -61,6 +62,7 @@ def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
         )
 
     if first_unknown is not None:
+        live_patch = resolve_host_patch_info(spec, runner)
         return HostVerdict(
             host=runner.host_name,
             cve_id=spec.cve_id,
@@ -69,11 +71,12 @@ def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
             justification=None,
             probe_results=results,
             mitigation=list(spec.mitigation),
-            patch=spec.patch,
+            patch=live_patch,
         )
 
     if spec.confidence.lower() != "high":
         met_summaries = "; ".join(r.evidence for r in results)
+        live_patch = resolve_host_patch_info(spec, runner)
         return HostVerdict(
             host=runner.host_name,
             cve_id=spec.cve_id,
@@ -85,10 +88,11 @@ def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
             justification=None,
             probe_results=results,
             mitigation=list(spec.mitigation),
-            patch=spec.patch,
+            patch=live_patch,
         )
 
     met_summaries = "; ".join(r.evidence for r in results)
+    live_patch = resolve_host_patch_info(spec, runner)
     return HostVerdict(
         host=runner.host_name,
         cve_id=spec.cve_id,
@@ -97,7 +101,7 @@ def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
         justification=None,
         probe_results=results,
         mitigation=list(spec.mitigation),
-        patch=spec.patch,
+        patch=live_patch,
     )
 
 

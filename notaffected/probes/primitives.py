@@ -1,4 +1,4 @@
-"""Closed set of 7 read-only deterministic probe primitives.
+"""Closed set of 9 read-only deterministic probe primitives.
 
 Every probe returns a ProbeResult with status in {MET, NOT_MET, UNKNOWN} and
 a concrete evidence string containing the command output snippet.
@@ -23,6 +23,8 @@ def run_probe(precondition: Precondition, runner: HostRunner) -> ProbeResult:
         "network_listener": _probe_network_listener,
         "firewall_allows_port": _probe_firewall_allows_port,
         "systemd_service_active": _probe_systemd_service,
+        "process_running": _probe_process_running,
+        "config_contains": _probe_config_contains,
     }
     handler = handlers.get(precondition.probe)
     if handler is None:
@@ -574,3 +576,165 @@ def _probe_systemd_service(pre: Precondition, runner: HostRunner) -> ProbeResult
         evidence=f"Could not determine systemd unit '{service}' state: {res.stderr.strip() or state}",
         command=cmd_str,
     )
+
+
+def _probe_process_running(pre: Precondition, runner: HostRunner) -> ProbeResult:
+    proc_name = str(pre.params.get("process") or "").strip()
+    if not proc_name:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence="Missing 'process' parameter in process_running",
+            command="",
+        )
+
+    cmd = ["ps", "-eo", "comm,args", "--no-headers"]
+    res = runner.run(cmd)
+    cmd_str = "ps -eo comm,args --no-headers"
+    if res.transport_error or res.returncode != 0:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Could not list processes via '{cmd_str}': {res.stderr.strip()}",
+            command=cmd_str,
+        )
+
+    target_lower = proc_name.lower()
+    for line in res.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        cols = stripped.split(None, 1)
+        comm = cols[0].lower()
+        if comm == target_lower or re.search(rf"\b{re.escape(target_lower)}\b", stripped.lower()):
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.MET,
+                evidence=f"Process '{proc_name}' is running ('{stripped[:80]}')",
+                command=cmd_str,
+            )
+
+    return ProbeResult(
+        precondition=pre,
+        status=ProbeStatus.NOT_MET,
+        evidence=f"Process '{proc_name}' is not running in 'ps -eo comm,args'",
+        command=cmd_str,
+    )
+
+
+_ALLOWED_CONFIG_PREFIXES = ("/etc/", "/proc/sys/", "/usr/share/", "/usr/lib/")
+
+
+def _probe_config_contains(pre: Precondition, runner: HostRunner) -> ProbeResult:
+    path_str = str(pre.params.get("path") or "").strip()
+    pattern = str(pre.params.get("pattern") or "").strip()
+    raw_neg = pre.params.get("negate", False)
+    negate = (
+        raw_neg.strip().lower() in ("true", "1", "yes")
+        if isinstance(raw_neg, str)
+        else bool(raw_neg)
+    )
+
+    if not path_str or not pattern:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence="Missing 'path' or 'pattern' parameter in config_contains",
+            command="",
+        )
+
+    if ".." in path_str.split("/") or not path_str.startswith(_ALLOWED_CONFIG_PREFIXES):
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Disallowed or unsafe config path: {path_str!r}",
+            command="",
+        )
+
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Invalid regex pattern {pattern!r}: {exc}",
+            command="",
+        )
+
+    cmd = ["cat", path_str]
+    res = runner.run(cmd)
+    cmd_str = f"cat {path_str}"
+    if res.transport_error:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Transport error reading '{path_str}': {res.stderr.strip()}",
+            command=cmd_str,
+        )
+
+    if res.returncode != 0:
+        err_lower = res.stderr.lower()
+        if "no such file" in err_lower:
+            # If the config file does not exist and we require a setting to be present (`negate=False`),
+            # it is NOT_MET; if `negate=True` (we require a mitigating setting to be absent), file absence means MET.
+            if negate:
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.MET,
+                    evidence=f"Config file '{path_str}' does not exist (mitigating pattern '{pattern}' not set)",
+                    command=cmd_str,
+                )
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.NOT_MET,
+                evidence=f"Config file '{path_str}' does not exist",
+                command=cmd_str,
+            )
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Could not read '{path_str}': {res.stderr.strip() or 'non-zero exit'}",
+            command=cmd_str,
+        )
+
+    matched_line: str | None = None
+    for raw_line in res.stdout.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        active_line = stripped.split("#", 1)[0].strip()
+        if not active_line:
+            continue
+        if regex.search(active_line):
+            matched_line = active_line
+            break
+
+    if negate:
+        if matched_line is not None:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.NOT_MET,
+                evidence=f"Mitigating setting active in '{path_str}': '{matched_line}'",
+                command=cmd_str,
+            )
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.MET,
+            evidence=f"Mitigating setting '{pattern}' not found in active lines of '{path_str}'",
+            command=cmd_str,
+        )
+
+    if matched_line is not None:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.MET,
+            evidence=f"Matched active setting in '{path_str}': '{matched_line}'",
+            command=cmd_str,
+        )
+    return ProbeResult(
+        precondition=pre,
+        status=ProbeStatus.NOT_MET,
+        evidence=f"Pattern '{pattern}' not present in active (non-comment) lines of '{path_str}'",
+        command=cmd_str,
+    )
+

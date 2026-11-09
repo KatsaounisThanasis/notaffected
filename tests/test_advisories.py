@@ -6,7 +6,13 @@ from notaffected.model import PROBE_TYPES
 
 
 def test_builtin_specs_valid_and_complete():
-    for cve_id in ("CVE-2026-98432", "CVE-2024-47176", "CVE-2023-32233", "CVE-2022-47942"):
+    for cve_id in (
+        "CVE-2026-98432",
+        "CVE-2024-47176",
+        "CVE-2023-32233",
+        "CVE-2022-47942",
+        "CVE-2024-6387",
+    ):
         assert cve_id in BUILTIN_SPECS
         spec = BUILTIN_SPECS[cve_id]
         assert spec.cve_id == cve_id
@@ -169,6 +175,92 @@ def test_kernel_path_mapping_and_ubuntu_osv_merge(monkeypatch):
     nft_spec = extract_from_osv_payload("CVE-2025-88888", nft_osv, use_llm=False)
     nft_mods = [p.params["module"] for p in nft_spec.preconditions if p.probe == "kernel_module_loaded"]
     assert nft_mods == ["nf_tables"]
+
+
+def test_fetch_advisories_concurrent(monkeypatch):
+    from notaffected.advisories.fetcher import fetch_advisories_concurrent
+
+    monkeypatch.setattr(
+        "notaffected.advisories.fetcher.fetch_osv_advisory",
+        lambda cve_id, cache_dir=None, timeout=8: {"id": cve_id, "summary": f"Summary for {cve_id}"},
+    )
+    results = fetch_advisories_concurrent(["CVE-2025-0001", "CVE-2025-0002", "CVE-2025-0001"])
+    assert set(results.keys()) == {"CVE-2025-0001", "CVE-2025-0002"}
+    assert results["CVE-2025-0001"]["summary"] == "Summary for CVE-2025-0001"
+
+
+def test_llm_extractor_validates_required_probe_params_and_reference_snippets(monkeypatch):
+    from notaffected.advisories.extractor import PROBE_PARAM_SCHEMA, validate_precondition_params
+    from notaffected.advisories.fetcher import strip_html_to_text
+    from notaffected.model import Precondition
+
+    assert "sysctl_equals" in PROBE_PARAM_SCHEMA
+    assert PROBE_PARAM_SCHEMA["sysctl_equals"] == ("key", "value")
+
+    # Missing required 'value' param in sysctl_equals must be rejected
+    incomplete_pre = Precondition(
+        probe="sysctl_equals",
+        params={"key": "net.ipv4.ip_forward"},
+        description="incomplete sysctl",
+    )
+    assert validate_precondition_params(incomplete_pre) is False
+
+    complete_pre = Precondition(
+        probe="sysctl_equals",
+        params={"key": "net.ipv4.ip_forward", "value": "1"},
+        description="complete sysctl",
+    )
+    assert validate_precondition_params(complete_pre) is True
+
+    # Verify HTML stripping helper for reference URLs and SSRF guard in fetch_reference_snippets
+    from notaffected.advisories.fetcher import fetch_reference_snippets
+
+    raw_html = "<html><head><style>body{}</style></head><body><h1>USN-1234</h1><p>Requires TCP port 8443 open.</p></body></html>"
+    cleaned = strip_html_to_text(raw_html)
+    assert "USN-1234" in cleaned
+    assert "TCP port 8443" in cleaned
+    assert "<html>" not in cleaned
+
+    # SSRF guard: localhost/127.0.0.1 reference URLs must be ignored
+    ssrf_osv = {
+        "references": [
+            {"type": "ADVISORY", "url": "https://127.0.0.1/internal"},
+            {"type": "ADVISORY", "url": "https://localhost/admin"},
+        ]
+    }
+    assert fetch_reference_snippets(ssrf_osv) == ""
+
+    # End-to-end LLM extraction drops precondition with missing required param ('value' missing in sysctl_equals)
+    monkeypatch.setattr(
+        "notaffected.advisories.extractor.generate_json",
+        lambda prompt, model=None, timeout=60: {
+            "preconditions": [
+                {
+                    "probe": "sysctl_equals",
+                    "params": {"key": "net.ipv4.ip_forward"},
+                    "description": "Missing value param — must be dropped",
+                },
+                {
+                    "probe": "process_running",
+                    "params": {"process": "nginx"},
+                    "description": "nginx process is active",
+                },
+            ],
+            "mitigation": [],
+        },
+    )
+    osv_sample = {
+        "id": "CVE-2025-77777",
+        "summary": "Short summary",
+        "details": "Short details",
+        "affected": [],
+    }
+    spec_llm = extract_from_osv_payload("CVE-2025-77777", osv_sample, use_llm=True)
+    probes = [p.probe for p in spec_llm.preconditions]
+    assert "sysctl_equals" not in probes
+    assert "process_running" in probes
+
+
 
 
 

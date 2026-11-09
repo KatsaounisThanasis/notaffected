@@ -24,6 +24,8 @@ def test_probe_types_closed_set():
         "network_listener",
         "firewall_allows_port",
         "systemd_service_active",
+        "process_running",
+        "config_contains",
     }
     assert PROBE_TYPES == expected
 

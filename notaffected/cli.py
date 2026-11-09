@@ -8,7 +8,9 @@ from pathlib import Path
 from rich.console import Console
 
 from notaffected import __version__
+from notaffected.advisories.builtin_specs import BUILTIN_SPECS
 from notaffected.advisories.extractor import resolve_check_spec
+from notaffected.advisories.fetcher import fetch_advisories_concurrent
 from notaffected.engine.evaluator import evaluate_fleet
 from notaffected.importers.scanners import parse_scanner_json
 from notaffected.inventory import load_demo_fleet, load_runners
@@ -147,11 +149,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "check":
+        non_builtin = [c for c in args.cves if c.strip().upper() not in BUILTIN_SPECS]
+        if len(non_builtin) > 1:
+            fetch_advisories_concurrent(non_builtin)
         specs: list[CheckSpec] = [
             resolve_check_spec(cve, use_llm=args.llm) for cve in args.cves
         ]
     elif args.command == "filter":
         findings = parse_scanner_json(args.scan_file)
+        non_builtin = [
+            f.cve_id for f in findings if f.cve_id.strip().upper() not in BUILTIN_SPECS
+        ]
+        if len(non_builtin) > 1:
+            fetch_advisories_concurrent(non_builtin)
         specs = []
         seen_cves: set[str] = set()
         for f in findings:

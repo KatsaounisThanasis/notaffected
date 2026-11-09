@@ -35,6 +35,11 @@ def load_demo_fleet() -> list[HostRunner]:
             ("dpkg", "--compare-versions", "2.0.0-0ubuntu10.1", "lt", "2.0.0-0ubuntu10.2"): CommandResult(
                 0, "", ""
             ),
+            ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "openssh-server"): CommandResult(
+                1, "", "dpkg-query: no packages found matching openssh-server\n"
+            ),
+            ("ps", "-eo", "comm,args", "--no-headers"): CommandResult(0, "systemd /sbin/init\n", ""),
+            ("cat", "/etc/ssh/sshd_config"): CommandResult(1, "", "cat: /etc/ssh/sshd_config: No such file or directory"),
             ("systemctl", "is-active", "cups-browsed.service"): CommandResult(3, "inactive\n", ""),
             ("ss", "-tulpnH"): CommandResult(
                 0,
@@ -60,9 +65,28 @@ def load_demo_fleet() -> list[HostRunner]:
             ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "cups-browsed"): CommandResult(
                 1, "", "dpkg-query: no packages found matching cups-browsed\n"
             ),
+            ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "openssh-server"): CommandResult(
+                0, "ii \t1:9.6p1-3ubuntu13\n", ""
+            ),
+            ("dpkg", "--compare-versions", "1:9.6p1-3ubuntu13", "lt", "1:9.6p1-3ubuntu13.3"): CommandResult(
+                0, "", ""
+            ),
+            ("ps", "-eo", "comm,args", "--no-headers"): CommandResult(
+                0, "sshd /usr/sbin/sshd -D\nnginx nginx: master process\n", ""
+            ),
+            ("cat", "/etc/ssh/sshd_config"): CommandResult(0, "PermitRootLogin no\nLoginGraceTime 120\n", ""),
+            ("apt-cache", "policy", "linux-image-generic"): CommandResult(
+                0,
+                "linux-image-generic:\n  Installed: 6.8.0-40.40\n  Candidate: 6.8.0-45.45\n"
+                "  Version table:\n     6.8.0-45.45 500\n"
+                "        500 http://archive.ubuntu.com/ubuntu noble-proposed/main amd64 Packages\n",
+                "",
+            ),
+            ("dpkg", "--compare-versions", "6.8.0-45.45", "ge", "6.8.0-45.45"): CommandResult(0, "", ""),
             ("ss", "-tulpnH"): CommandResult(
                 0,
-                "tcp LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:((\"nginx\",pid=900,fd=6))\n",
+                "tcp LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:((\"nginx\",pid=900,fd=6))\n"
+                "tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=850,fd=3))\n",
                 "",
             ),
             ("ufw", "status", "verbose"): CommandResult(
@@ -83,6 +107,14 @@ def load_demo_fleet() -> list[HostRunner]:
             ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "cups-browsed"): CommandResult(
                 1, "", "dpkg-query: no packages found matching cups-browsed\n"
             ),
+            ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "openssh-server"): CommandResult(
+                0, "ii \t1:9.6p1-3ubuntu13.4\n", ""
+            ),
+            ("dpkg", "--compare-versions", "1:9.6p1-3ubuntu13.4", "lt", "1:9.6p1-3ubuntu13.3"): CommandResult(
+                1, "", ""
+            ),
+            ("ps", "-eo", "comm,args", "--no-headers"): CommandResult(0, "sshd /usr/sbin/sshd -D\n", ""),
+            ("cat", "/etc/ssh/sshd_config"): CommandResult(0, "LoginGraceTime 0\n", ""),
             ("ss", "-tulpnH"): CommandResult(
                 0,
                 "tcp LISTEN 0 128 0.0.0.0:5432 0.0.0.0:*\n",

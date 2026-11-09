@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from notaffected.advisories.builtin_specs import BUILTIN_SPECS
-from notaffected.advisories.fetcher import fetch_osv_advisory, fetch_ubuntu_osv_advisory
+from notaffected.advisories.fetcher import (
+    fetch_osv_advisory,
+    fetch_reference_snippets,
+    fetch_ubuntu_osv_advisory,
+)
 from notaffected.local_model import generate_json
 from notaffected.model import (
     PROBE_TYPES,
@@ -50,6 +54,42 @@ KERNEL_PATH_TO_MODULE: dict[str, str] = {
     "drivers/usb/storage/": "usb_storage",
     "net/mptcp/": "mptcp_diag",
 }
+
+PROBE_PARAM_SCHEMA: dict[str, tuple[str, ...]] = {
+    "kernel_version_vulnerable": ("fixed_version",),
+    "package_installed_vulnerable": ("package",),
+    "kernel_module_loaded": ("module",),
+    "sysctl_equals": ("key", "value"),
+    "network_listener": ("proto",),
+    "firewall_allows_port": ("proto",),
+    "systemd_service_active": ("service",),
+    "process_running": ("process",),
+    "config_contains": ("path", "pattern"),
+}
+
+PROBE_OPTIONAL_PARAMS: dict[str, tuple[str, ...]] = {
+    "kernel_version_vulnerable": ("min_version",),
+    "package_installed_vulnerable": ("fixed_version",),
+    "kernel_module_loaded": (),
+    "sysctl_equals": (),
+    "network_listener": ("port", "process", "scope"),
+    "firewall_allows_port": ("port",),
+    "systemd_service_active": (),
+    "process_running": (),
+    "config_contains": ("negate",),
+}
+
+
+def validate_precondition_params(pre: Precondition) -> bool:
+    """Verify that `pre.params` contains all required keys with non-empty values."""
+    if pre.probe not in PROBE_TYPES:
+        return False
+    required_keys = PROBE_PARAM_SCHEMA.get(pre.probe, ())
+    for req_key in required_keys:
+        val = pre.params.get(req_key)
+        if val is None or str(val).strip() == "":
+            return False
+    return True
 
 
 def resolve_check_spec(
@@ -215,7 +255,12 @@ def extract_from_osv_payload(
 
     source = "osv"
     if use_llm:
-        llm_pres, llm_mitigations = _extract_via_llm(cve_id, full_text)
+        enriched_text = full_text
+        if len(details) < 300:
+            ref_snippets = fetch_reference_snippets(osv_data)
+            if ref_snippets:
+                enriched_text = f"{full_text}\n\n{ref_snippets}"
+        llm_pres, llm_mitigations = _extract_via_llm(cve_id, enriched_text)
         existing_probes = {_precondition_dedup_key(p) for p in preconditions}
         for lp in llm_pres:
             key = _precondition_dedup_key(lp)
@@ -237,6 +282,8 @@ def extract_from_osv_payload(
             "network_listener",
             "firewall_allows_port",
             "systemd_service_active",
+            "process_running",
+            "config_contains",
         )
         for p in preconditions
     )
@@ -314,14 +361,20 @@ def _extract_via_llm(
     advisory_text: str,
 ) -> tuple[list[Precondition], list[str]]:
     """Ask the local/configured LLM to map advisory prose into closed PROBE_TYPES.
-    Drops any unrecognized probe type or malformed entry.
+    Drops any unrecognized probe type, missing required parameter, or malformed entry.
     """
+    schema_lines = "\n".join(
+        f"  - {probe}: required={list(req_keys)}, optional={list(PROBE_OPTIONAL_PARAMS.get(probe, ()))}"
+        for probe, req_keys in sorted(PROBE_PARAM_SCHEMA.items())
+    )
     prompt = (
         f"Extract deterministic Linux runtime preconditions for {cve_id} from the advisory below.\n"
-        f"Allowed probe types ONLY: {sorted(PROBE_TYPES)}.\n"
+        f"Allowed probe types and their required `params` keys ONLY:\n{schema_lines}\n"
+        "Allowed `justification_if_not_met` values: component_not_present, vulnerable_code_not_present, "
+        "vulnerable_code_not_in_execute_path, inline_mitigations_already_exist.\n"
         "Return strict JSON: {\"preconditions\": [{\"probe\": \"...\", \"params\": {...}, "
         "\"description\": \"...\", \"justification_if_not_met\": \"...\"}], \"mitigation\": [\"...\"]}.\n\n"
-        f"Advisory:\n{advisory_text[:3000]}"
+        f"Advisory:\n{advisory_text[:4000]}"
     )
     resp = generate_json(prompt)
     if not resp:
@@ -335,9 +388,12 @@ def _extract_via_llm(
         if probe_name not in PROBE_TYPES:
             continue
         try:
-            valid_preconditions.append(Precondition.from_dict(raw_p))
+            cand = Precondition.from_dict(raw_p)
         except (ValueError, KeyError, TypeError):
             continue
+        if not validate_precondition_params(cand):
+            continue
+        valid_preconditions.append(cand)
 
     mitigations = [
         str(m) for m in (resp.get("mitigation") or []) if isinstance(m, str) and m.strip()

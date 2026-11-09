@@ -20,7 +20,7 @@ Every week dozens of new CVEs are published, and AI-assisted research is finding
 ```mermaid
 flowchart LR
     A["CVE ID / Trivy / Grype JSON"] --> B["Advisory Extractor\n(Built-in + OSV / Ubuntu OSV + Optional LLM)"]
-    B --> C["CheckSpec\n(Closed 7-Probe DSL)"]
+    B --> C["CheckSpec\n(Closed 9-Probe DSL)"]
     C --> D["Read-Only Probes\n(Local / SSH / Docker / K8s)"]
     D --> E["Three-Valued Engine\n(MET / NOT_MET / UNKNOWN)"]
     E --> F["Rich Terminal + Mitigations"]
@@ -28,7 +28,7 @@ flowchart LR
     E --> H["Standalone HTML Report (.html)"]
 ```
 
-### Closed Set of 7 Read-Only Probes
+### Closed Set of 9 Read-Only Probes
 
 | Probe Type | System Check | OpenVEX Justification (when `NOT_MET`) |
 |---|---|---|
@@ -39,6 +39,8 @@ flowchart LR
 | `network_listener` | `ss -tulpnH` (loopback `127.0.0.0/8`, `::1`, `%lo` vs public) | `vulnerable_code_not_in_execute_path` |
 | `firewall_allows_port` | `ufw status verbose` | `inline_mitigations_already_exist` |
 | `systemd_service_active` | `systemctl is-active <unit>` | `vulnerable_code_not_in_execute_path` |
+| `process_running` | `ps -eo comm,args --no-headers` | `vulnerable_code_not_in_execute_path` |
+| `config_contains` | `cat <config_path>` (comment-aware regex match) | `inline_mitigations_already_exist` / `vulnerable_code_not_in_execute_path` |
 
 ---
 
