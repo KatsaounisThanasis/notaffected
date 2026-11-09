@@ -16,6 +16,8 @@ from notaffected.probes.runner import HostRunner
 def resolve_host_patch_info(spec: CheckSpec, runner: HostRunner) -> PatchInfo:
     """Inspect `apt-cache policy` on `runner` to see if the fix for `spec` is ready in apt."""
     base_patch = spec.patch
+    if getattr(runner, "os_family", "linux").lower() != "linux":
+        return base_patch
     fixed_ver = (base_patch.fixed_version or "").strip()
 
     target_pkg: str | None = None

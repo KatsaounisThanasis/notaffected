@@ -161,3 +161,16 @@ def test_evaluate_fleet_preserves_order():
     verdicts = evaluate_fleet([spec], [r1])
     assert len(verdicts) == 1
     assert verdicts[0].status == VerdictStatus.NOT_AFFECTED
+
+
+def test_os_mismatch_short_circuits_to_not_affected():
+    linux_spec = _make_cve_spec()
+    assert linux_spec.os_family == "linux"
+    win_runner = MockRunner(host_name="win-srv-01", responses={}, os_family="windows")
+    verdict = evaluate_host(linux_spec, win_runner)
+    assert verdict.status == VerdictStatus.NOT_AFFECTED
+    assert verdict.justification == VexJustification.COMPONENT_NOT_PRESENT
+    assert "windows" in verdict.reason.lower()
+    assert verdict.product_id == "pkg:generic/windows-host@win-srv-01"
+    assert verdict.probe_results == []
+

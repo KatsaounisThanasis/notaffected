@@ -464,6 +464,127 @@ def test_live_apt_policy_patch_tracker():
     assert "not-yet-in-apt" in patch_pending.status
 
 
+def test_windows_probes_build_registry_and_service():
+    ps_kb_cmd = (
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$cv = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'; "
+        "$build = \"$($cv.CurrentBuildNumber).$($cv.UBR)\"; "
+        "$kbs = @(Get-HotFix -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HotFixID) -join ','; "
+        "Write-Output \"BUILD=$build|KBS=$kbs\"",
+    )
+    ps_reg_ipv6 = (
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "(Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters' "
+        "-Name 'DisabledComponents' -ErrorAction Stop).'DisabledComponents'",
+    )
+    ps_svc_spooler = (
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "(Get-Service -Name 'Spooler' -ErrorAction Stop).Status",
+    )
+
+    # 1. Vulnerable Windows Server: unpatched build 20348.2402, missing KB5041585, IPv6 enabled (0), Spooler Running
+    win_vuln = MockRunner(
+        host_name="win-dc-01",
+        os_family="windows",
+        responses={
+            ps_kb_cmd: CommandResult(0, "BUILD=20348.2402|KBS=KB5039217,KB5040437\n", ""),
+            ps_reg_ipv6: CommandResult(0, "0\n", ""),
+            ps_svc_spooler: CommandResult(0, "Running\n", ""),
+        },
+    )
+    p_kb = Precondition(
+        "windows_build_vulnerable",
+        {"kb": "KB5041585", "fixed_build": "20348.2655"},
+        "Missing KB5041585 and build < 20348.2655",
+    )
+    assert run_probe(p_kb, win_vuln).status == ProbeStatus.MET
+
+    p_reg = Precondition(
+        "windows_registry_equals",
+        {
+            "path": r"HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters",
+            "name": "DisabledComponents",
+            "value": "255",
+            "negate": True,
+        },
+        "IPv6 DisabledComponents is not set to 0xff (255)",
+    )
+    assert run_probe(p_reg, win_vuln).status == ProbeStatus.MET
+
+    p_svc = Precondition(
+        "windows_service_active",
+        {"service": "Spooler"},
+        "Print Spooler service is running",
+    )
+    assert run_probe(p_svc, win_vuln).status == ProbeStatus.MET
+
+    # 2. Mitigated/Patched Windows Server: KB5041585 installed OR DisabledComponents=255, Spooler Stopped
+    win_safe = MockRunner(
+        host_name="win-safe-02",
+        os_family="windows",
+        responses={
+            ps_kb_cmd: CommandResult(0, "BUILD=20348.2655|KBS=KB5041585\n", ""),
+            ps_reg_ipv6: CommandResult(0, "255\n", ""),
+            ps_svc_spooler: CommandResult(0, "Stopped\n", ""),
+        },
+    )
+    assert run_probe(p_kb, win_safe).status == ProbeStatus.NOT_MET
+    assert run_probe(p_reg, win_safe).status == ProbeStatus.NOT_MET
+    assert run_probe(p_svc, win_safe).status == ProbeStatus.NOT_MET
+
+    # 3. Injection attempt in registry path (including Unicode curly quotes) -> UNKNOWN
+    p_inj = Precondition(
+        "windows_registry_equals",
+        {"path": "HKLM:\\Software; Stop-Computer", "name": "Foo", "value": "1"},
+        "injection test",
+    )
+    assert run_probe(p_inj, win_vuln).status == ProbeStatus.UNKNOWN
+
+    p_unicode_inj = Precondition(
+        "windows_registry_equals",
+        {"path": "HKLM:\\Software\u2019 -or (Restart-Computer)", "name": "Foo", "value": "1"},
+        "unicode quote injection test",
+    )
+    assert run_probe(p_unicode_inj, win_vuln).status == ProbeStatus.UNKNOWN
+
+    # 4. Cross-major OS build without matching KB -> UNKNOWN (never false NOT_MET)
+    win_different_branch = MockRunner(
+        host_name="win11-01",
+        os_family="windows",
+        responses={
+            ps_kb_cmd: CommandResult(0, "BUILD=22621.100|KBS=KB5000001\n", ""),
+        },
+    )
+    assert run_probe(p_kb, win_different_branch).status == ProbeStatus.UNKNOWN
+
+    # 5. Windows process_running (.exe normalization)
+    ps_proc_cmd = (
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-Process | Select-Object -ExpandProperty ProcessName",
+    )
+    win_proc_runner = MockRunner(
+        host_name="win-proc-01",
+        os_family="windows",
+        responses={ps_proc_cmd: CommandResult(0, "System\nspoolsv\nlsass\n", "")},
+    )
+    p_win_proc = Precondition("process_running", {"process": "spoolsv.exe"}, "spoolsv running")
+    assert run_probe(p_win_proc, win_proc_runner).status == ProbeStatus.MET
+
+
+
+
 
 
 

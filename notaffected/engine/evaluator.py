@@ -15,6 +15,7 @@ from notaffected.model import (
     ProbeResult,
     ProbeStatus,
     VerdictStatus,
+    VexJustification,
 )
 from notaffected.probes.patch_tracker import resolve_host_patch_info
 from notaffected.probes.primitives import run_probe
@@ -23,6 +24,33 @@ from notaffected.probes.runner import HostRunner
 
 def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
     """Evaluate all preconditions in `spec` against `runner`."""
+    host_os = getattr(runner, "os_family", "linux").lower()
+    spec_os = (spec.os_family or "linux").lower()
+    if host_os not in ("linux", "windows") or spec_os not in ("linux", "windows"):
+        return HostVerdict(
+            host=runner.host_name,
+            cve_id=spec.cve_id,
+            status=VerdictStatus.UNDER_INVESTIGATION,
+            reason=f"Unsupported or unknown OS family (host='{host_os}', spec='{spec_os}')",
+            justification=None,
+            probe_results=[],
+            mitigation=list(spec.mitigation),
+            patch=spec.patch,
+            os_family=host_os,
+        )
+    if spec_os != host_os:
+        return HostVerdict(
+            host=runner.host_name,
+            cve_id=spec.cve_id,
+            status=VerdictStatus.NOT_AFFECTED,
+            reason=f"Host OS family is '{host_os}', whereas {spec.cve_id} targets '{spec_os}'",
+            justification=VexJustification.COMPONENT_NOT_PRESENT,
+            probe_results=[],
+            mitigation=[],
+            patch=spec.patch,
+            os_family=host_os,
+        )
+
     if not spec.preconditions:
         return HostVerdict(
             host=runner.host_name,
@@ -33,6 +61,7 @@ def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
             probe_results=[],
             mitigation=list(spec.mitigation),
             patch=spec.patch,
+            os_family=host_os,
         )
 
     results: list[ProbeResult] = []
@@ -59,6 +88,7 @@ def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
             probe_results=results,
             mitigation=[],
             patch=spec.patch,
+            os_family=host_os,
         )
 
     if first_unknown is not None:
@@ -72,6 +102,7 @@ def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
             probe_results=results,
             mitigation=list(spec.mitigation),
             patch=live_patch,
+            os_family=host_os,
         )
 
     if spec.confidence.lower() != "high":
@@ -89,6 +120,7 @@ def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
             probe_results=results,
             mitigation=list(spec.mitigation),
             patch=live_patch,
+            os_family=host_os,
         )
 
     met_summaries = "; ".join(r.evidence for r in results)
@@ -102,6 +134,7 @@ def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
         probe_results=results,
         mitigation=list(spec.mitigation),
         patch=live_patch,
+        os_family=host_os,
     )
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from notaffected.model import CheckSpec, HostVerdict, VerdictStatus
 
@@ -105,3 +106,17 @@ def render_verdicts(
             just_str = v.justification.value if v.justification else "n/a"
             table.add_row(v.host, v.cve_id, just_str, v.reason)
         con.print(table)
+
+
+def render_ai_briefing(briefing_text: str, console: Console | None = None) -> None:
+    """Render the AI or deterministic operational triage briefing in a Rich Panel."""
+    con = console or Console()
+    con.print("")
+    con.print(
+        Panel(
+            Text(briefing_text),
+            title="[bold magenta]AI Operational Risk & Remediation Briefing[/bold magenta]",
+            expand=False,
+        )
+    )
+

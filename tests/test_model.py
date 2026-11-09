@@ -26,6 +26,9 @@ def test_probe_types_closed_set():
         "systemd_service_active",
         "process_running",
         "config_contains",
+        "windows_build_vulnerable",
+        "windows_registry_equals",
+        "windows_service_active",
     }
     assert PROBE_TYPES == expected
 

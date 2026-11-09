@@ -123,12 +123,56 @@ def load_demo_fleet() -> list[HostRunner]:
             ("ufw", "status", "verbose"): CommandResult(0, "Status: inactive\n", ""),
         },
     )
-    return [laptop, edge_server, patched_db]
+    ps_kb_cmd = (
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$cv = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'; "
+        "$build = \"$($cv.CurrentBuildNumber).$($cv.UBR)\"; "
+        "$kbs = @(Get-HotFix -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HotFixID) -join ','; "
+        "Write-Output \"BUILD=$build|KBS=$kbs\"",
+    )
+    ps_reg_ipv6 = (
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "(Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters' "
+        "-Name 'DisabledComponents' -ErrorAction Stop).'DisabledComponents'",
+    )
+    ps_svc_spooler = (
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "(Get-Service -Name 'Spooler' -ErrorAction Stop).Status",
+    )
+    win_dc = MockRunner(
+        host_name="win-dc-01",
+        os_family="windows",
+        responses={
+            ps_kb_cmd: CommandResult(0, "BUILD=20348.2402|KBS=KB5039217\n", ""),
+            ps_reg_ipv6: CommandResult(0, "0\n", ""),
+            ps_svc_spooler: CommandResult(0, "Running\n", ""),
+        },
+    )
+    win_filesrv = MockRunner(
+        host_name="win-filesrv-02",
+        os_family="windows",
+        responses={
+            ps_kb_cmd: CommandResult(0, "BUILD=20348.2402|KBS=KB5039217\n", ""),
+            ps_reg_ipv6: CommandResult(0, "255\n", ""),
+            ps_svc_spooler: CommandResult(0, "Stopped\n", ""),
+        },
+    )
+    return [laptop, edge_server, patched_db, win_dc, win_filesrv]
 
 
 def load_runners(
     host: str | None = None,
     ssh_targets: list[str] | None = None,
+    win_ssh_targets: list[str] | None = None,
     docker_targets: list[str] | None = None,
     k8s_targets: list[str] | None = None,
     inventory_path: Path | None = None,
@@ -161,6 +205,11 @@ def load_runners(
                         or "host"
                     )
                     etype = str(entry.get("type") or "").lower()
+                    os_family = str(entry.get("os") or entry.get("os_family") or "linux").lower()
+                    if os_family not in ("linux", "windows"):
+                        raise ValueError(
+                            f"Unsupported OS family in inventory for {name}: {os_family!r} (expected 'linux' or 'windows')"
+                        )
                     ssh_dest = entry.get("ssh") or entry.get("host")
                     docker_dest = entry.get("docker")
                     k8s_dest = entry.get("k8s")
@@ -173,13 +222,16 @@ def load_runners(
                                 f"Invalid SSH port in inventory for {name}: {entry['port']!r}"
                             ) from exc
                     if etype == "local" or ssh_dest in ("local", "localhost"):
-                        runners.append(LocalRunner(host_name=name, timeout=timeout))
+                        runners.append(
+                            LocalRunner(host_name=name, timeout=timeout, os_family=os_family)
+                        )
                     elif docker_dest:
                         runners.append(
                             DockerRunner(
                                 container=str(docker_dest),
                                 host_name=name,
                                 timeout=timeout,
+                                os_family=os_family,
                             )
                         )
                     elif k8s_dest:
@@ -190,6 +242,7 @@ def load_runners(
                                 container=entry.get("container"),
                                 host_name=name,
                                 timeout=timeout,
+                                os_family=os_family,
                             )
                         )
                     elif ssh_dest:
@@ -199,6 +252,7 @@ def load_runners(
                                 host_name=name,
                                 timeout=timeout,
                                 port=port,
+                                os_family=os_family,
                             )
                         )
         else:
@@ -216,6 +270,10 @@ def load_runners(
     if ssh_targets:
         for target in ssh_targets:
             runners.append(SSHRunner(target=target, timeout=timeout))
+
+    if win_ssh_targets:
+        for target in win_ssh_targets:
+            runners.append(SSHRunner(target=target, timeout=timeout, os_family="windows"))
 
     if docker_targets:
         for container in docker_targets:

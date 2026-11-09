@@ -12,6 +12,8 @@ def test_builtin_specs_valid_and_complete():
         "CVE-2023-32233",
         "CVE-2022-47942",
         "CVE-2024-6387",
+        "CVE-2024-38063",
+        "CVE-2021-34527",
     ):
         assert cve_id in BUILTIN_SPECS
         spec = BUILTIN_SPECS[cve_id]
@@ -21,6 +23,8 @@ def test_builtin_specs_valid_and_complete():
         for pre in spec.preconditions:
             assert pre.probe in PROBE_TYPES
         assert len(spec.mitigation) >= 1
+    assert BUILTIN_SPECS["CVE-2024-38063"].os_family == "windows"
+    assert BUILTIN_SPECS["CVE-2021-34527"].os_family == "windows"
 
 
 def test_extract_from_osv_payload_deterministic_heuristics():
@@ -259,6 +263,64 @@ def test_llm_extractor_validates_required_probe_params_and_reference_snippets(mo
     probes = [p.probe for p in spec_llm.preconditions]
     assert "sysctl_equals" not in probes
     assert "process_running" in probes
+
+
+def test_windows_advisory_heuristics_and_multi_provider_llm(monkeypatch):
+    from notaffected import local_model
+    from notaffected.advisories.ai_advisor import build_remediation_briefing
+    from notaffected.engine.evaluator import evaluate_fleet
+    from notaffected.inventory import load_demo_fleet
+
+    win_osv = {
+        "id": "CVE-2025-55555",
+        "summary": "Microsoft Windows Server Print Spooler remote code execution",
+        "details": (
+            "A remote code execution vulnerability exists in the Windows Print Spooler service (Spooler). "
+            "Install security update KB5099999 to resolve this issue."
+        ),
+        "affected": [],
+    }
+    win_spec = extract_from_osv_payload("CVE-2025-55555", win_osv, use_llm=False)
+    assert win_spec.os_family == "windows"
+    win_probes = [p.probe for p in win_spec.preconditions]
+    assert "windows_build_vulnerable" in win_probes
+    assert "windows_service_active" in win_probes
+    assert win_spec.confidence == "high"
+
+    # Verify provider detection for Gemini and Anthropic
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("NOTAFFECTED_LLM_URL", raising=False)
+    assert local_model.detect_provider() == "gemini"
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    assert local_model.detect_provider() == "anthropic"
+
+    # Verify AI remediation briefing works both with LLM and deterministic fallback
+    fleet = load_demo_fleet()
+    specs = [BUILTIN_SPECS["CVE-2026-98432"], BUILTIN_SPECS["CVE-2024-38063"]]
+    verdicts = evaluate_fleet(specs, fleet)
+
+    monkeypatch.setattr("notaffected.advisories.ai_advisor.generate", lambda *a, **kw: "")
+    fallback_brief = build_remediation_briefing(specs, verdicts)
+    assert "prod-edge-api-01" in fallback_brief
+    assert "win-dc-01" in fallback_brief
+
+    # Verify Gemini model prefix stripping and Anthropic response extraction
+    url_gem, _, _ = local_model._build_http_request(
+        "gemini", "test prompt", "models/gemini-2.5-flash", True
+    )
+    assert "/models/gemini-2.5-flash:generateContent" in url_gem
+    assert "/models/models/" not in url_gem
+    assert (
+        local_model._extract_response_text(
+            "anthropic", {"content": [{"type": "text", "text": '{"ok": true}'}]}
+        )
+        == '{"ok": true}'
+    )
+
+
 
 
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from rich.console import Console
 
 from notaffected import __version__
+from notaffected.advisories.ai_advisor import build_remediation_briefing
 from notaffected.advisories.builtin_specs import BUILTIN_SPECS
 from notaffected.advisories.extractor import resolve_check_spec
 from notaffected.advisories.fetcher import fetch_advisories_concurrent
@@ -15,7 +16,7 @@ from notaffected.engine.evaluator import evaluate_fleet
 from notaffected.importers.scanners import parse_scanner_json
 from notaffected.inventory import load_demo_fleet, load_runners
 from notaffected.model import CheckSpec
-from notaffected.render.console import render_spec, render_verdicts
+from notaffected.render.console import render_ai_briefing, render_spec, render_verdicts
 from notaffected.render.html import write_html_report
 from notaffected.render.json_out import write_json_report
 from notaffected.render.vex import write_openvex
@@ -81,6 +82,13 @@ def _add_target_and_output_args(p: argparse.ArgumentParser) -> None:
         help="Remote SSH target (user@host); may be passed multiple times",
     )
     p.add_argument(
+        "--win-ssh",
+        action="append",
+        dest="win_ssh_targets",
+        default=None,
+        help="Remote Windows OpenSSH target (user@win-host); executes read-only PowerShell probes",
+    )
+    p.add_argument(
         "--docker",
         action="append",
         dest="docker_targets",
@@ -130,6 +138,11 @@ def _add_target_and_output_args(p: argparse.ArgumentParser) -> None:
         "--llm",
         action="store_true",
         help="Allow optional local/configured LLM to extract preconditions for unknown CVEs",
+    )
+    p.add_argument(
+        "--ai-explain",
+        action="store_true",
+        help="Generate a post-verdict AI/operational risk and remediation safety briefing",
     )
     p.add_argument(
         "--fail-on-affected",
@@ -185,12 +198,17 @@ def main(argv: list[str] | None = None) -> int:
         runners = load_runners(
             host=args.host,
             ssh_targets=args.ssh_targets,
+            win_ssh_targets=args.win_ssh_targets,
             docker_targets=args.docker_targets,
             k8s_targets=args.k8s_targets,
             inventory_path=args.inventory,
         )
     verdicts = evaluate_fleet(specs, runners)
     render_verdicts(specs, verdicts, console=console)
+
+    if args.ai_explain:
+        briefing = build_remediation_briefing(specs, verdicts)
+        render_ai_briefing(briefing, console=console)
 
     if args.emit_vex:
         write_openvex(verdicts, args.emit_vex)

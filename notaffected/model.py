@@ -50,6 +50,9 @@ PROBE_TYPES: frozenset[str] = frozenset(
         "systemd_service_active",
         "process_running",
         "config_contains",
+        "windows_build_vulnerable",
+        "windows_registry_equals",
+        "windows_service_active",
     }
 )
 
@@ -134,6 +137,7 @@ class CheckSpec:
     patch: PatchInfo = field(default_factory=lambda: PatchInfo(status="unknown"))
     confidence: str = "high"  # "high" | "low"
     source: str = "builtin"  # "builtin" | "osv" | "osv+llm" | "fallback"
+    os_family: str = "linux"  # "linux" | "windows"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -145,6 +149,7 @@ class CheckSpec:
             "patch": self.patch.to_dict(),
             "confidence": self.confidence,
             "source": self.source,
+            "os_family": self.os_family,
         }
 
     @classmethod
@@ -160,6 +165,7 @@ class CheckSpec:
             patch=PatchInfo.from_dict(data.get("patch")),
             confidence=str(data.get("confidence") or "high"),
             source=str(data.get("source") or "builtin"),
+            os_family=str(data.get("os_family") or "linux").lower(),
         )
 
 
@@ -194,10 +200,11 @@ class HostVerdict:
     mitigation: list[str] = field(default_factory=list)
     patch: PatchInfo | None = None
     product_id: str = ""
+    os_family: str = "linux"
 
     def __post_init__(self) -> None:
         if not self.product_id:
-            self.product_id = f"pkg:generic/linux-host@{self.host}"
+            self.product_id = f"pkg:generic/{self.os_family}-host@{self.host}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -210,4 +217,5 @@ class HostVerdict:
             "mitigation": list(self.mitigation),
             "patch": self.patch.to_dict() if self.patch else None,
             "product_id": self.product_id,
+            "os_family": self.os_family,
         }

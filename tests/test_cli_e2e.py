@@ -125,6 +125,58 @@ def test_inventory_docker_and_k8s_entries(tmp_path: Path):
     assert names == ["api-container", "worker-pod", "docker:redis-local", "k8s:default/web-pod"]
 
 
+def test_inventory_windows_ssh_entries(tmp_path: Path):
+    inv_file = tmp_path / "win_hosts.yml"
+    inv_file.write_text(
+        "hosts:\n"
+        "  - name: win-dc-01\n"
+        "    ssh: Administrator@10.0.1.50\n"
+        "    os: windows\n",
+        encoding="utf-8",
+    )
+    runners = load_runners(
+        host=None,
+        ssh_targets=None,
+        win_ssh_targets=["Administrator@10.0.1.51"],
+        inventory_path=inv_file,
+    )
+    assert len(runners) == 2
+    assert runners[0].host_name == "win-dc-01"
+    assert runners[0].os_family == "windows"
+    assert runners[1].host_name == "Administrator@10.0.1.51"
+    assert runners[1].os_family == "windows"
+
+
+def test_mixed_linux_and_windows_demo_fleet():
+    from notaffected.inventory import load_demo_fleet
+
+    fleet = load_demo_fleet()
+    host_names = [r.host_name for r in fleet]
+    assert "win-dc-01" in host_names
+    assert "win-filesrv-02" in host_names
+
+    specs = [
+        BUILTIN_SPECS["CVE-2026-98432"],
+        BUILTIN_SPECS["CVE-2024-38063"],
+        BUILTIN_SPECS["CVE-2021-34527"],
+    ]
+    verdicts = evaluate_fleet(specs, fleet)
+    by_pair = {(v.host, v.cve_id): v for v in verdicts}
+
+    # Linux CVE on Windows host -> NOT_AFFECTED (component_not_present)
+    assert by_pair[("win-dc-01", "CVE-2026-98432")].status == VerdictStatus.NOT_AFFECTED
+    # Windows CVE on Linux host -> NOT_AFFECTED (component_not_present)
+    assert by_pair[("prod-edge-api-01", "CVE-2024-38063")].status == VerdictStatus.NOT_AFFECTED
+    # Windows CVE on unpatched Windows DC -> AFFECTED
+    assert by_pair[("win-dc-01", "CVE-2024-38063")].status == VerdictStatus.AFFECTED
+    assert by_pair[("win-dc-01", "CVE-2021-34527")].status == VerdictStatus.AFFECTED
+    # Windows CVE on mitigated Windows file server -> NOT_AFFECTED
+    assert by_pair[("win-filesrv-02", "CVE-2024-38063")].status == VerdictStatus.NOT_AFFECTED
+    assert by_pair[("win-filesrv-02", "CVE-2021-34527")].status == VerdictStatus.NOT_AFFECTED
+
+
+
+
 
 def test_cli_spec_check_and_filter_live_local(tmp_path: Path):
     # 1. `notaffected spec CVE-2026-98432`

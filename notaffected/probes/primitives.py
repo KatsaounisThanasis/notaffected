@@ -25,6 +25,9 @@ def run_probe(precondition: Precondition, runner: HostRunner) -> ProbeResult:
         "systemd_service_active": _probe_systemd_service,
         "process_running": _probe_process_running,
         "config_contains": _probe_config_contains,
+        "windows_build_vulnerable": _probe_windows_build_vulnerable,
+        "windows_registry_equals": _probe_windows_registry_equals,
+        "windows_service_active": _probe_windows_service_active,
     }
     handler = handlers.get(precondition.probe)
     if handler is None:
@@ -588,6 +591,40 @@ def _probe_process_running(pre: Precondition, runner: HostRunner) -> ProbeResult
             command="",
         )
 
+    if getattr(runner, "os_family", "linux").lower() == "windows":
+        ps_cmd = [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-Process | Select-Object -ExpandProperty ProcessName",
+        ]
+        res_win = runner.run(ps_cmd)
+        cmd_win_str = "powershell Get-Process"
+        if res_win.transport_error or res_win.returncode != 0:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=f"Could not list Windows processes: {res_win.stderr.strip()}",
+                command=cmd_win_str,
+            )
+        target_win = proc_name.lower().removesuffix(".exe")
+        for line in res_win.stdout.splitlines():
+            p_clean = line.strip().lower().removesuffix(".exe")
+            if p_clean and p_clean == target_win:
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.MET,
+                    evidence=f"Windows process '{line.strip()}' is running",
+                    command=cmd_win_str,
+                )
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.NOT_MET,
+            evidence=f"Windows process '{proc_name}' is not running (Get-Process)",
+            command=cmd_win_str,
+        )
+
     cmd = ["ps", "-eo", "comm,args", "--no-headers"]
     res = runner.run(cmd)
     cmd_str = "ps -eo comm,args --no-headers"
@@ -737,4 +774,270 @@ def _probe_config_contains(pre: Precondition, runner: HostRunner) -> ProbeResult
         evidence=f"Pattern '{pattern}' not present in active (non-comment) lines of '{path_str}'",
         command=cmd_str,
     )
+
+
+_SAFE_REG_PATH_RE = re.compile(r"\A(?:HKLM|HKCU):\\[A-Za-z0-9_\\.\- ]+\Z", re.IGNORECASE)
+_SAFE_REG_NAME_RE = re.compile(r"\A[A-Za-z0-9_.\- ]+\Z")
+_SAFE_WIN_SVC_RE = re.compile(r"\A[A-Za-z0-9_.-]+\Z")
+
+
+def _parse_win_build(build_str: str) -> tuple[int, int] | None:
+    m = re.match(r"\A(\d+)\.(\d+)\Z", build_str.strip())
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _probe_windows_build_vulnerable(pre: Precondition, runner: HostRunner) -> ProbeResult:
+    kb = str(pre.params.get("kb") or "").strip().upper()
+    fixed_build = str(pre.params.get("fixed_build") or "").strip()
+    if not kb and not fixed_build:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence="Missing 'kb' or 'fixed_build' parameter in windows_build_vulnerable",
+            command="",
+        )
+
+    ps_script = (
+        "$cv = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'; "
+        "$build = \"$($cv.CurrentBuildNumber).$($cv.UBR)\"; "
+        "$kbs = @(Get-HotFix -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HotFixID) -join ','; "
+        "Write-Output \"BUILD=$build|KBS=$kbs\""
+    )
+    cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script]
+    res = runner.run(cmd)
+    cmd_str = "powershell Get-HotFix / CurrentVersion UBR"
+    if res.transport_error or res.returncode != 0 or "BUILD=" not in res.stdout:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Failed to query Windows OS build/hotfixes via PowerShell: {res.stderr.strip() or 'invalid output'}",
+            command=cmd_str,
+        )
+
+    out_line = res.stdout.strip().splitlines()[-1]
+    build_val = ""
+    kbs_set: set[str] = set()
+    for part in out_line.split("|"):
+        if part.startswith("BUILD="):
+            build_val = part.removeprefix("BUILD=").strip()
+        elif part.startswith("KBS="):
+            raw_kbs = part.removeprefix("KBS=").strip()
+            kbs_set = {k.strip().upper() for k in raw_kbs.split(",") if k.strip()}
+
+    if kb and kb in kbs_set:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.NOT_MET,
+            evidence=f"Security update '{kb}' is installed on Windows build '{build_val}'",
+            command=cmd_str,
+        )
+
+    actual_parsed = _parse_win_build(build_val)
+    if actual_parsed is None:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Could not parse Windows OS build '{build_val}' (and KB '{kb or 'N/A'}' not found)",
+            command=cmd_str,
+        )
+
+    if fixed_build:
+        fixed_parsed = _parse_win_build(fixed_build)
+        if fixed_parsed is None:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=f"Invalid fixed_build format '{fixed_build}'",
+                command=cmd_str,
+            )
+        actual_major, actual_ubr = actual_parsed
+        fixed_major, fixed_ubr = fixed_parsed
+        if actual_major != fixed_major:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=(
+                    f"Windows OS major build '{actual_major}' ({build_val}) differs from "
+                    f"target branch '{fixed_major}' ({fixed_build}) and '{kb or 'N/A'}' is not installed"
+                ),
+                command=cmd_str,
+            )
+        if actual_ubr >= fixed_ubr:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.NOT_MET,
+                evidence=f"Windows OS build '{build_val}' is >= fixed build '{fixed_build}'",
+                command=cmd_str,
+            )
+
+    return ProbeResult(
+        precondition=pre,
+        status=ProbeStatus.MET,
+        evidence=(
+            f"Windows OS build '{build_val}' is < fixed build '{fixed_build or 'N/A'}' "
+            f"and security update '{kb or 'N/A'}' is not installed"
+        ),
+        command=cmd_str,
+    )
+
+
+def _registry_values_match(actual: str, expected: str) -> bool:
+    act = actual.strip()
+    exp = expected.strip()
+    if act.lower() == exp.lower():
+        return True
+    try:
+        return int(act, 0) == int(exp, 0)
+    except ValueError:
+        return False
+
+
+def _probe_windows_registry_equals(pre: Precondition, runner: HostRunner) -> ProbeResult:
+    reg_path = str(pre.params.get("path") or "").strip()
+    reg_name = str(pre.params.get("name") or "").strip()
+    expected = str(pre.params.get("value") or "").strip()
+    raw_neg = pre.params.get("negate", False)
+    negate = (
+        raw_neg.strip().lower() in ("true", "1", "yes")
+        if isinstance(raw_neg, str)
+        else bool(raw_neg)
+    )
+
+    if not reg_path or not reg_name or expected == "":
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence="Missing 'path', 'name', or 'value' in windows_registry_equals",
+            command="",
+        )
+
+    if not _SAFE_REG_PATH_RE.match(reg_path) or not _SAFE_REG_NAME_RE.match(reg_name):
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Disallowed or unsafe Windows Registry path/name: {reg_path!r} / {reg_name!r}",
+            command="",
+        )
+
+    ps_script = f"(Get-ItemProperty -Path '{reg_path}' -Name '{reg_name}' -ErrorAction Stop).'{reg_name}'"
+    cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script]
+    res = runner.run(cmd)
+    cmd_str = f"powershell Get-ItemProperty {reg_path} {reg_name}"
+
+    if res.transport_error:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Transport error reading Windows Registry '{reg_path}': {res.stderr.strip()}",
+            command=cmd_str,
+        )
+
+    if res.returncode != 0:
+        err_lower = " ".join(res.stderr.lower().split())
+        if "does not exist" in err_lower or "cannot find path" in err_lower:
+            if negate:
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.MET,
+                    evidence=f"Registry value '{reg_name}' not set at '{reg_path}' (mitigation '{expected}' absent)",
+                    command=cmd_str,
+                )
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.NOT_MET,
+                evidence=f"Registry value '{reg_name}' does not exist at '{reg_path}'",
+                command=cmd_str,
+            )
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Could not read Windows Registry '{reg_path}': {res.stderr.strip()}",
+            command=cmd_str,
+        )
+
+    actual = res.stdout.strip()
+    matched = _registry_values_match(actual, expected)
+
+    if negate:
+        if matched:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.NOT_MET,
+                evidence=f"Mitigating Registry value '{reg_name}={actual}' is active at '{reg_path}'",
+                command=cmd_str,
+            )
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.MET,
+            evidence=f"Registry value '{reg_name}' at '{reg_path}' is '{actual}' (mitigation '{expected}' not applied)",
+            command=cmd_str,
+        )
+
+    if matched:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.MET,
+            evidence=f"Registry value '{reg_name}' at '{reg_path}' equals '{actual}'",
+            command=cmd_str,
+        )
+    return ProbeResult(
+        precondition=pre,
+        status=ProbeStatus.NOT_MET,
+        evidence=f"Registry value '{reg_name}' at '{reg_path}' is '{actual}' (required '{expected}')",
+        command=cmd_str,
+    )
+
+
+def _probe_windows_service_active(pre: Precondition, runner: HostRunner) -> ProbeResult:
+    service = str(pre.params.get("service") or "").strip()
+    if not service or not _SAFE_WIN_SVC_RE.match(service):
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Missing or unsafe Windows service name: {service!r}",
+            command="",
+        )
+
+    ps_script = f"(Get-Service -Name '{service}' -ErrorAction Stop).Status"
+    cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script]
+    res = runner.run(cmd)
+    cmd_str = f"powershell Get-Service {service}"
+    if res.transport_error:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Transport error checking Windows service '{service}': {res.stderr.strip()}",
+            command=cmd_str,
+        )
+
+    state = res.stdout.strip().lower()
+    err_lower = " ".join(res.stderr.lower().split())
+    if res.returncode == 0 and state == "running":
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.MET,
+            evidence=f"Windows service '{service}' is Running",
+            command=cmd_str,
+        )
+    if (
+        state in ("stopped", "stoppending", "paused")
+        or "cannot find any service" in err_lower
+        or "noservicefoundforgivenname" in err_lower
+    ):
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.NOT_MET,
+            evidence=f"Windows service '{service}' is not running (status='{res.stdout.strip() or 'not-installed'}')",
+            command=cmd_str,
+        )
+    return ProbeResult(
+        precondition=pre,
+        status=ProbeStatus.UNKNOWN,
+        evidence=f"Could not determine Windows service '{service}' state: {res.stderr.strip() or state}",
+        command=cmd_str,
+    )
+
+
 

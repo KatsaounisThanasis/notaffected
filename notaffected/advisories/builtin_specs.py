@@ -202,4 +202,76 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         confidence="high",
         source="builtin",
     ),
+    "CVE-2024-38063": CheckSpec(
+        cve_id="CVE-2024-38063",
+        summary=(
+            "Windows TCP/IP IPv6 stack integer underflow remote code execution "
+            "(unauthenticated packet-of-death)"
+        ),
+        severity="CRITICAL",
+        os_family="windows",
+        preconditions=[
+            Precondition(
+                probe="windows_build_vulnerable",
+                params={"kb": "KB5041585", "fixed_build": "20348.2655"},
+                description="Windows OS build is < 20348.2655 and security update KB5041585 is not installed",
+                justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_PRESENT,
+            ),
+            Precondition(
+                probe="windows_registry_equals",
+                params={
+                    "path": r"HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters",
+                    "name": "DisabledComponents",
+                    "value": "255",
+                    "negate": True,
+                },
+                description="IPv6 is not disabled via Registry (DisabledComponents != 0xff / 255)",
+                justification_if_not_met=VexJustification.INLINE_MITIGATIONS_ALREADY_EXIST,
+            ),
+        ],
+        mitigation=[
+            r"Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' -Name 'DisabledComponents' -Value 0xff -Type DWord",
+            "Install Windows Security Update KB5041585 (OS Build 20348.2655+)",
+        ],
+        patch=PatchInfo(
+            status="released",
+            fixed_version="KB5041585 (20348.2655)",
+            pocket="msrc-security-update",
+            advisory_url="https://msrc.microsoft.com/update-guide/vulnerability/CVE-2024-38063",
+        ),
+        confidence="high",
+        source="builtin",
+    ),
+    "CVE-2021-34527": CheckSpec(
+        cve_id="CVE-2021-34527",
+        summary="Windows Print Spooler (PrintNightmare) remote code execution and privilege escalation",
+        severity="CRITICAL",
+        os_family="windows",
+        preconditions=[
+            Precondition(
+                probe="windows_build_vulnerable",
+                params={"kb": "KB5004945", "fixed_build": "20348.2600"},
+                description="Security update KB5004945 is not installed and Windows build < 20348.2600",
+                justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_PRESENT,
+            ),
+            Precondition(
+                probe="windows_service_active",
+                params={"service": "Spooler"},
+                description="Windows Print Spooler service ('Spooler') is Running",
+                justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+            ),
+        ],
+        mitigation=[
+            "Stop-Service -Name Spooler -Force; Set-Service -Name Spooler -StartupType Disabled",
+            "Install Windows Security Update KB5004945 and restrict Point and Print in Group Policy",
+        ],
+        patch=PatchInfo(
+            status="released",
+            fixed_version="KB5004945",
+            pocket="msrc-out-of-band",
+            advisory_url="https://msrc.microsoft.com/update-guide/vulnerability/CVE-2021-34527",
+        ),
+        confidence="high",
+        source="builtin",
+    ),
 }

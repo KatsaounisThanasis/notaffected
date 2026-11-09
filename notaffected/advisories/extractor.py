@@ -31,7 +31,6 @@ KNOWN_KERNEL_MODULES = (
     "rds",
     "tipc",
     "sctp",
-    "can",
     "overlay",
     "usb_storage",
     "mptcp_diag",
@@ -65,6 +64,9 @@ PROBE_PARAM_SCHEMA: dict[str, tuple[str, ...]] = {
     "systemd_service_active": ("service",),
     "process_running": ("process",),
     "config_contains": ("path", "pattern"),
+    "windows_build_vulnerable": ("kb",),
+    "windows_registry_equals": ("path", "name", "value"),
+    "windows_service_active": ("service",),
 }
 
 PROBE_OPTIONAL_PARAMS: dict[str, tuple[str, ...]] = {
@@ -77,6 +79,23 @@ PROBE_OPTIONAL_PARAMS: dict[str, tuple[str, ...]] = {
     "systemd_service_active": (),
     "process_running": (),
     "config_contains": ("negate",),
+    "windows_build_vulnerable": ("fixed_build",),
+    "windows_registry_equals": ("negate",),
+    "windows_service_active": (),
+}
+
+WINDOWS_ALLOWED_PROBES: frozenset[str] = frozenset(
+    {
+        "windows_build_vulnerable",
+        "windows_registry_equals",
+        "windows_service_active",
+        "process_running",
+    }
+)
+LINUX_ALLOWED_PROBES: frozenset[str] = PROBE_TYPES - {
+    "windows_build_vulnerable",
+    "windows_registry_equals",
+    "windows_service_active",
 }
 
 
@@ -84,6 +103,10 @@ def validate_precondition_params(pre: Precondition) -> bool:
     """Verify that `pre.params` contains all required keys with non-empty values."""
     if pre.probe not in PROBE_TYPES:
         return False
+    if pre.probe == "windows_build_vulnerable":
+        kb = str(pre.params.get("kb") or "").strip()
+        fb = str(pre.params.get("fixed_build") or "").strip()
+        return bool(kb or fb)
     required_keys = PROBE_PARAM_SCHEMA.get(pre.probe, ())
     for req_key in required_keys:
         val = pre.params.get(req_key)
@@ -184,7 +207,50 @@ def extract_from_osv_payload(
     preconditions: list[Precondition] = []
     mitigation: list[str] = []
 
-    is_kernel = pkg_name in ("linux", "linux-image", "kernel") or "linux kernel" in full_text.lower()
+    text_lower = full_text.lower()
+    is_windows = any(
+        phrase in text_lower
+        for phrase in (
+            "windows server",
+            "microsoft windows",
+            "windows 10",
+            "windows 11",
+            "hklm\\",
+            "hklm:\\",
+            "print spooler",
+        )
+    )
+    os_family = "windows" if is_windows else "linux"
+
+    if is_windows:
+        kb_match = re.search(r"\b(KB\d{6,8})\b", full_text, re.IGNORECASE)
+        if kb_match:
+            kb_id = kb_match.group(1).upper()
+            fixed_ver = fixed_ver or kb_id
+            ecosystem = ecosystem or "msrc"
+            preconditions.append(
+                Precondition(
+                    probe="windows_build_vulnerable",
+                    params={"kb": kb_id},
+                    description=f"Windows security update {kb_id} is not installed",
+                    justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_PRESENT,
+                )
+            )
+        if "spooler" in text_lower:
+            preconditions.append(
+                Precondition(
+                    probe="windows_service_active",
+                    params={"service": "Spooler"},
+                    description="Windows Print Spooler service ('Spooler') is Running",
+                    justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+                )
+            )
+            mitigation.append("Stop-Service -Name Spooler -Force; Set-Service -Name Spooler -StartupType Disabled")
+
+    is_kernel = (
+        not is_windows
+        and (pkg_name in ("linux", "linux-image", "kernel") or "linux kernel" in text_lower)
+    )
     if is_kernel:
         preconditions.append(
             Precondition(
@@ -194,7 +260,7 @@ def extract_from_osv_payload(
                 justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_PRESENT,
             )
         )
-    elif pkg_name:
+    elif pkg_name and not is_windows:
         preconditions.append(
             Precondition(
                 probe="package_installed_vulnerable",
@@ -211,47 +277,47 @@ def extract_from_osv_payload(
             )
         )
 
-    # Deterministic heuristic extraction for kernel modules (by name, alias, or kernel source path)
-    text_lower = full_text.lower()
-    detected_module: str | None = None
-    for mod in KNOWN_KERNEL_MODULES:
-        if re.search(rf"\b{re.escape(mod)}\b", text_lower):
-            detected_module = mod
-            break
-    if not detected_module:
-        for alias, canonical_mod in KERNEL_ALIAS_TO_MODULE.items():
-            if re.search(rf"\b{re.escape(alias)}\b", text_lower):
-                detected_module = canonical_mod
+    # Deterministic heuristic extraction for Linux kernel modules and listeners
+    if not is_windows:
+        detected_module: str | None = None
+        for mod in KNOWN_KERNEL_MODULES:
+            if re.search(rf"\b{re.escape(mod)}\b", text_lower):
+                detected_module = mod
                 break
-    if not detected_module:
-        for path_prefix, mapped_mod in KERNEL_PATH_TO_MODULE.items():
-            if path_prefix in text_lower:
-                detected_module = mapped_mod
-                break
-    if detected_module:
-        preconditions.append(
-            Precondition(
-                probe="kernel_module_loaded",
-                params={"module": detected_module},
-                description=f"Kernel module '{detected_module}' is loaded",
-                justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+        if not detected_module:
+            for alias, canonical_mod in KERNEL_ALIAS_TO_MODULE.items():
+                if re.search(rf"\b{re.escape(alias)}\b", text_lower):
+                    detected_module = canonical_mod
+                    break
+        if not detected_module:
+            for path_prefix, mapped_mod in KERNEL_PATH_TO_MODULE.items():
+                if path_prefix in text_lower:
+                    detected_module = mapped_mod
+                    break
+        if detected_module:
+            preconditions.append(
+                Precondition(
+                    probe="kernel_module_loaded",
+                    params={"module": detected_module},
+                    description=f"Kernel module '{detected_module}' is loaded",
+                    justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+                )
             )
-        )
-        mitigation.append(f"sudo modprobe -r {detected_module}")
+            mitigation.append(f"sudo modprobe -r {detected_module}")
 
-    port_match = re.search(r"\b(tcp|udp)\s+port\s+(\d{1,5})\b", text_lower)
-    if port_match:
-        proto = port_match.group(1).lower()
-        port_num = int(port_match.group(2))
-        preconditions.append(
-            Precondition(
-                probe="network_listener",
-                params={"proto": proto, "port": port_num, "scope": "non_loopback"},
-                description=f"{proto.upper()} port {port_num} is listening on a non-loopback address",
-                justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+        port_match = re.search(r"\b(tcp|udp)\s+port\s+(\d{1,5})\b", text_lower)
+        if port_match:
+            proto = port_match.group(1).lower()
+            port_num = int(port_match.group(2))
+            preconditions.append(
+                Precondition(
+                    probe="network_listener",
+                    params={"proto": proto, "port": port_num, "scope": "non_loopback"},
+                    description=f"{proto.upper()} port {port_num} is listening on a non-loopback address",
+                    justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+                )
             )
-        )
-        mitigation.append(f"sudo ufw deny {port_num}/{proto}")
+            mitigation.append(f"sudo ufw deny {port_num}/{proto}")
 
     source = "osv"
     if use_llm:
@@ -260,7 +326,9 @@ def extract_from_osv_payload(
             ref_snippets = fetch_reference_snippets(osv_data)
             if ref_snippets:
                 enriched_text = f"{full_text}\n\n{ref_snippets}"
-        llm_pres, llm_mitigations = _extract_via_llm(cve_id, enriched_text)
+        llm_pres, llm_mitigations = _extract_via_llm(
+            cve_id, enriched_text, os_family=os_family
+        )
         existing_probes = {_precondition_dedup_key(p) for p in preconditions}
         for lp in llm_pres:
             key = _precondition_dedup_key(lp)
@@ -284,6 +352,8 @@ def extract_from_osv_payload(
             "systemd_service_active",
             "process_running",
             "config_contains",
+            "windows_registry_equals",
+            "windows_service_active",
         )
         for p in preconditions
     )
@@ -309,6 +379,7 @@ def extract_from_osv_payload(
         ),
         confidence=confidence,
         source=source,
+        os_family=os_family,
     )
 
 
@@ -359,16 +430,20 @@ def _extract_severity(osv_data: dict[str, Any]) -> str:
 def _extract_via_llm(
     cve_id: str,
     advisory_text: str,
+    os_family: str = "linux",
 ) -> tuple[list[Precondition], list[str]]:
     """Ask the local/configured LLM to map advisory prose into closed PROBE_TYPES.
-    Drops any unrecognized probe type, missing required parameter, or malformed entry.
+    Drops any unrecognized probe type, cross-OS probe, missing required parameter, or malformed entry.
     """
+    allowed_set = WINDOWS_ALLOWED_PROBES if os_family == "windows" else LINUX_ALLOWED_PROBES
     schema_lines = "\n".join(
         f"  - {probe}: required={list(req_keys)}, optional={list(PROBE_OPTIONAL_PARAMS.get(probe, ()))}"
         for probe, req_keys in sorted(PROBE_PARAM_SCHEMA.items())
+        if probe in allowed_set
     )
+    os_label = "Windows Server" if os_family == "windows" else "Linux"
     prompt = (
-        f"Extract deterministic Linux runtime preconditions for {cve_id} from the advisory below.\n"
+        f"Extract deterministic {os_label} runtime preconditions for {cve_id} from the advisory below.\n"
         f"Allowed probe types and their required `params` keys ONLY:\n{schema_lines}\n"
         "Allowed `justification_if_not_met` values: component_not_present, vulnerable_code_not_present, "
         "vulnerable_code_not_in_execute_path, inline_mitigations_already_exist.\n"
@@ -385,7 +460,7 @@ def _extract_via_llm(
         if not isinstance(raw_p, dict):
             continue
         probe_name = str(raw_p.get("probe") or "")
-        if probe_name not in PROBE_TYPES:
+        if probe_name not in allowed_set:
             continue
         try:
             cand = Precondition.from_dict(raw_p)

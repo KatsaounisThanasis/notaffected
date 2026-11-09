@@ -6,6 +6,7 @@ BatchMode=yes so prompts never hang automation.
 
 from __future__ import annotations
 
+import base64
 import shlex
 import socket
 import subprocess
@@ -27,6 +28,7 @@ class HostRunner(Protocol):
     """Protocol implemented by LocalRunner, SSHRunner, and MockRunner."""
 
     host_name: str
+    os_family: str
 
     def run(self, argv: list[str]) -> CommandResult:
         ...
@@ -35,9 +37,15 @@ class HostRunner(Protocol):
 class LocalRunner:
     """Executes probe commands directly on the local machine without a shell."""
 
-    def __init__(self, host_name: str | None = None, timeout: int = 10) -> None:
+    def __init__(
+        self,
+        host_name: str | None = None,
+        timeout: int = 10,
+        os_family: str = "linux",
+    ) -> None:
         self.host_name = host_name or socket.gethostname() or "localhost"
         self.timeout = timeout
+        self.os_family = os_family.lower()
         self._cache: dict[tuple[str, ...], CommandResult] = {}
 
     def run(self, argv: list[str]) -> CommandResult:
@@ -96,11 +104,13 @@ class SSHRunner:
         host_name: str | None = None,
         timeout: int = 10,
         port: int | None = None,
+        os_family: str = "linux",
     ) -> None:
         self.target = target
         self.host_name = host_name or target
         self.timeout = timeout
         self.port = port
+        self.os_family = os_family.lower()
         self._cache: dict[tuple[str, ...], CommandResult] = {}
 
     def run(self, argv: list[str]) -> CommandResult:
@@ -112,7 +122,16 @@ class SSHRunner:
         return res
 
     def _run_uncached(self, argv: list[str]) -> CommandResult:
-        remote_cmd = shlex.join(argv)
+        if (
+            self.os_family == "windows"
+            and len(argv) >= 2
+            and argv[0].lower() in ("powershell", "powershell.exe", "pwsh")
+            and argv[-2].lower() == "-command"
+        ):
+            encoded = base64.b64encode(argv[-1].encode("utf-16le")).decode("ascii")
+            remote_cmd = f"powershell -NoProfile -NonInteractive -EncodedCommand {encoded}"
+        else:
+            remote_cmd = shlex.join(argv)
         ssh_argv = [
             "ssh",
             "-o",
@@ -156,10 +175,12 @@ class DockerRunner:
         container: str,
         host_name: str | None = None,
         timeout: int = 10,
+        os_family: str = "linux",
     ) -> None:
         self.container = container
         self.host_name = host_name or f"docker:{container}"
         self.timeout = timeout
+        self.os_family = os_family.lower()
         self._cache: dict[tuple[str, ...], CommandResult] = {}
 
     def run(self, argv: list[str]) -> CommandResult:
@@ -228,6 +249,7 @@ class K8sRunner:
         container: str | None = None,
         host_name: str | None = None,
         timeout: int = 10,
+        os_family: str = "linux",
     ) -> None:
         if namespace is None and "/" in pod:
             ns_part, pod_part = pod.split("/", 1)
@@ -240,6 +262,7 @@ class K8sRunner:
         default_label = f"k8s:{self.namespace}/{self.pod}" if self.namespace else f"k8s:{self.pod}"
         self.host_name = host_name or default_label
         self.timeout = timeout
+        self.os_family = os_family.lower()
         self._cache: dict[tuple[str, ...], CommandResult] = {}
 
     def run(self, argv: list[str]) -> CommandResult:
@@ -315,9 +338,11 @@ class MockRunner:
         self,
         host_name: str,
         responses: dict[tuple[str, ...], CommandResult],
+        os_family: str = "linux",
     ) -> None:
         self.host_name = host_name
         self.responses = dict(responses)
+        self.os_family = os_family.lower()
 
     def run(self, argv: list[str]) -> CommandResult:
         key = tuple(argv)
