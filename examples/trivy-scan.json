@@ -1,0 +1,46 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "production-fleet-rootfs",
+  "ArtifactType": "filesystem",
+  "Results": [
+    {
+      "Target": "ubuntu-24.04",
+      "Class": "os-pkgs",
+      "Type": "ubuntu",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2024-6387",
+          "PkgName": "openssh-server",
+          "InstalledVersion": "1:9.6p1-3ubuntu13",
+          "FixedVersion": "1:9.6p1-3ubuntu13.3",
+          "Severity": "CRITICAL",
+          "Title": "OpenSSH: regreSSHion unauthenticated remote code execution in sshd"
+        },
+        {
+          "VulnerabilityID": "CVE-2024-47176",
+          "PkgName": "cups-browsed",
+          "InstalledVersion": "2.0.0-0ubuntu10.1",
+          "FixedVersion": "2.0.0-0ubuntu10.2",
+          "Severity": "HIGH",
+          "Title": "cups-browsed binds on UDP INADDR_ANY:631 trusting any packet source"
+        },
+        {
+          "VulnerabilityID": "CVE-2024-1086",
+          "PkgName": "linux-image-generic",
+          "InstalledVersion": "6.8.0-40.40",
+          "FixedVersion": "6.8.0-45.45",
+          "Severity": "HIGH",
+          "Title": "Linux kernel nf_tables use-after-free local privilege escalation"
+        },
+        {
+          "VulnerabilityID": "CVE-2026-98432",
+          "PkgName": "linux-image-generic",
+          "InstalledVersion": "6.8.0-40.40",
+          "FixedVersion": "6.8.0-45.45",
+          "Severity": "CRITICAL",
+          "Title": "Linux kernel IPv4 TCP/MPTCP options use-after-free race condition"
+        }
+      ]
+    }
+  ]
+}

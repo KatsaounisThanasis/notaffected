@@ -217,6 +217,8 @@ def extract_from_osv_payload(
         for phrase in (
             "windows server",
             "microsoft windows",
+            "windows shell",
+            "windows tcp/ip",
             "microsoft message queuing",
             "active directory",
             "windows 10",

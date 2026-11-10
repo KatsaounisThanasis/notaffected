@@ -13,6 +13,7 @@ from notaffected.model import CheckSpec, HostVerdict, VerdictStatus
 def build_remediation_briefing(
     specs: list[CheckSpec],
     verdicts: list[HostVerdict],
+    use_llm: bool = True,
 ) -> str:
     """Generate a host-aware remediation & operational impact briefing."""
     actionable = [
@@ -38,15 +39,16 @@ def build_remediation_briefing(
         )
 
     prompt = (
-        "Output ONLY 3 single-line bullets (one per finding below, no intro text, no code blocks): "
+        f"Output ONLY {len(findings_lines)} single-line bullet(s) (one per finding below, no intro text, no code blocks): "
         "[Host/CVE] Risk | Safest mitigation avoiding active service disruption | Patch readiness.\n\n"
         + "\n".join(findings_lines)
     )
 
-    llm_reply = generate(prompt, timeout=90, json_format=False, max_tokens=240).strip()
-    if llm_reply:
-        provider = detect_provider()
-        return f"[Provider: {provider}]\n{llm_reply}"
+    if use_llm:
+        llm_reply = generate(prompt, timeout=90, json_format=False, max_tokens=240).strip()
+        if llm_reply:
+            provider = detect_provider()
+            return f"[Provider: {provider}]\n{llm_reply}"
 
     # Deterministic host-aware operational triage when no LLM is reachable
     out_lines: list[str] = [

@@ -12,14 +12,19 @@ from notaffected.advisories.ai_advisor import build_remediation_briefing
 from notaffected.advisories.builtin_specs import BUILTIN_SPECS
 from notaffected.advisories.extractor import resolve_check_spec
 from notaffected.advisories.fetcher import fetch_advisories_concurrent
+from notaffected.advisories.live_feed import collect_scan_specs
 from notaffected.engine.evaluator import evaluate_fleet
 from notaffected.importers.scanners import parse_scanner_json
-from notaffected.inventory import load_demo_fleet, load_runners
-from notaffected.model import CheckSpec
+from notaffected.inventory import (
+    generate_inventory_yaml,
+    load_demo_fleet,
+    load_runners,
+)
 from notaffected.render.console import render_ai_briefing, render_spec, render_verdicts
 from notaffected.render.html import write_html_report
 from notaffected.render.json_out import write_json_report
 from notaffected.render.vex import write_openvex
+from notaffected.web import run_web_server
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -63,6 +68,58 @@ def _build_parser() -> argparse.ArgumentParser:
         "--llm",
         action="store_true",
         help="Use configured local/OpenAI-compatible LLM to extract preconditions from prose",
+    )
+
+    # `notaffected scan`
+    p_scan = sub.add_parser(
+        "scan",
+        help="Auto-scan hosts against built-in rules, live OSV package batch API, and CISA KEV feed",
+    )
+    p_scan.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip live OSV and CISA KEV network queries; evaluate built-in rules only",
+    )
+    _add_target_and_output_args(p_scan)
+
+    # `notaffected init`
+    p_init = sub.add_parser(
+        "init",
+        help="Generate a starter fleet inventory YAML file (optionally auto-discovering Docker containers)",
+    )
+    p_init.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=Path("inventory.yaml"),
+        help="Output path for inventory file (default: inventory.yaml)",
+    )
+    p_init.add_argument(
+        "--discover-docker",
+        action="store_true",
+        help="Populate the inventory with currently running Docker containers",
+    )
+    p_init.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the output file if it already exists",
+    )
+
+    # `notaffected ui`
+    p_ui = sub.add_parser(
+        "ui",
+        help="Launch the local Web Dashboard (http://127.0.0.1:8484)",
+    )
+    p_ui.add_argument(
+        "--bind",
+        default="127.0.0.1",
+        help="Bind address for local Web UI (default: 127.0.0.1)",
+    )
+    p_ui.add_argument(
+        "--port",
+        type=int,
+        default=8484,
+        help="Port for local Web UI (default: 8484)",
     )
 
     return parser
@@ -168,11 +225,57 @@ def main(argv: list[str] | None = None) -> int:
         render_spec(spec, console=console)
         return 0
 
-    if args.command == "check":
+    if args.command == "init":
+        out_path: Path = args.output
+        if out_path.exists() and not args.force:
+            console.print(
+                f"[bold yellow]Inventory file already exists:[/bold yellow] {out_path} "
+                "(use --force to overwrite)"
+            )
+            return 1
+        yaml_text = generate_inventory_yaml(discover_docker=args.discover_docker)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(yaml_text, encoding="utf-8")
+        console.print(f"[bold green]Inventory written to:[/bold green] {out_path}")
+        return 0
+
+    if args.command == "ui":
+        console.print(
+            f"[bold cyan]notaffected Web Dashboard listening on:[/bold cyan] "
+            f"http://{args.bind}:{args.port} (Press Ctrl+C to stop)"
+        )
+        run_web_server(host=args.bind, port=args.port)
+        return 0
+
+    if args.demo_fleet:
+        runners = load_demo_fleet()
+    else:
+        runners = load_runners(
+            host=args.host,
+            ssh_targets=args.ssh_targets,
+            win_ssh_targets=args.win_ssh_targets,
+            docker_targets=args.docker_targets,
+            win_docker_targets=args.win_docker_targets,
+            k8s_targets=args.k8s_targets,
+            inventory_path=args.inventory,
+        )
+
+    if args.command == "scan":
+        specs, feed_meta = collect_scan_specs(
+            runners,
+            offline=args.offline,
+            use_llm=args.llm,
+        )
+        console.print(
+            f"[dim]Auto-Scan Feed: {feed_meta['builtin_count']} built-in rules | "
+            f"{len(feed_meta['osv_live_cves'])} live OSV package CVEs | "
+            f"{len(feed_meta['cisa_kev_cves'])} live CISA KEV CVEs[/dim]\n"
+        )
+    elif args.command == "check":
         non_builtin = [c for c in args.cves if c.strip().upper() not in BUILTIN_SPECS]
         if len(non_builtin) > 1:
             fetch_advisories_concurrent(non_builtin)
-        specs: list[CheckSpec] = [
+        specs = [
             resolve_check_spec(cve, use_llm=args.llm) for cve in args.cves
         ]
     elif args.command == "filter":
@@ -198,24 +301,12 @@ def main(argv: list[str] | None = None) -> int:
             )
     else:
         return 2
-
-    if args.demo_fleet:
-        runners = load_demo_fleet()
-    else:
-        runners = load_runners(
-            host=args.host,
-            ssh_targets=args.ssh_targets,
-            win_ssh_targets=args.win_ssh_targets,
-            docker_targets=args.docker_targets,
-            win_docker_targets=args.win_docker_targets,
-            k8s_targets=args.k8s_targets,
-            inventory_path=args.inventory,
-        )
     verdicts = evaluate_fleet(specs, runners)
     render_verdicts(specs, verdicts, console=console)
 
     if args.ai_explain:
-        briefing = build_remediation_briefing(specs, verdicts)
+        use_llm = not getattr(args, "offline", False)
+        briefing = build_remediation_briefing(specs, verdicts, use_llm=use_llm)
         render_ai_briefing(briefing, console=console)
 
     if args.emit_vex:

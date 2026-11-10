@@ -9,10 +9,16 @@ for c in "${CONTAINERS[@]}"; do
 done
 
 echo "[1/4] Starting Linux container: lab-ssh-vuln (Vulnerable OpenSSH CVE-2024-6387)..."
-docker run -d --name lab-ssh-vuln --memory 32m --cpus 0.1 "$IMAGE" sleep infinity >/dev/null
+docker run -d --name lab-ssh-vuln --label notaffected.lab=true --label notaffected.os=linux --memory 32m --cpus 0.1 "$IMAGE" sleep infinity >/dev/null
 docker exec lab-ssh-vuln sh -c '
   mkdir -p /etc/ssh /usr/local/bin
   printf "Port 22\nPermitRootLogin no\nLoginGraceTime 120\n" > /etc/ssh/sshd_config
+
+  cat << "EOF" > /usr/local/bin/uname
+#!/bin/sh
+echo "6.8.0-45-generic"
+EOF
+  chmod +x /usr/local/bin/uname
 
   cat << "EOF" > /usr/local/bin/dpkg-query
 #!/bin/sh
@@ -29,12 +35,11 @@ EOF
 
   cat << "EOF" > /usr/local/bin/dpkg
 #!/bin/sh
-# dpkg --compare-versions <v1> <op> <v2>
 v1="$2"
 op="$3"
 v2="$4"
 if [ "$op" = "lt" ]; then
-  [ "$v1" != "$v2" ] && exit 0 || exit 1
+  [ "$v1" != "$v2" ] && [ "$(printf "%s\n%s\n" "$v1" "$v2" | sort -V | head -n1)" = "$v1" ] && exit 0 || exit 1
 fi
 exit 0
 EOF
@@ -67,10 +72,16 @@ EOF
 '
 
 echo "[2/4] Starting Linux container: lab-ssh-mitigated (Mitigated OpenSSH CVE-2024-6387)..."
-docker run -d --name lab-ssh-mitigated --memory 32m --cpus 0.1 "$IMAGE" sleep infinity >/dev/null
+docker run -d --name lab-ssh-mitigated --label notaffected.lab=true --label notaffected.os=linux --memory 32m --cpus 0.1 "$IMAGE" sleep infinity >/dev/null
 docker exec lab-ssh-mitigated sh -c '
   mkdir -p /etc/ssh /usr/local/bin
   printf "Port 22\nPermitRootLogin no\nLoginGraceTime 0\n" > /etc/ssh/sshd_config
+
+  cat << "EOF" > /usr/local/bin/uname
+#!/bin/sh
+echo "6.8.0-45-generic"
+EOF
+  chmod +x /usr/local/bin/uname
 
   cat << "EOF" > /usr/local/bin/dpkg-query
 #!/bin/sh
@@ -91,7 +102,7 @@ v1="$2"
 op="$3"
 v2="$4"
 if [ "$op" = "lt" ]; then
-  [ "$v1" != "$v2" ] && exit 0 || exit 1
+  [ "$v1" != "$v2" ] && [ "$(printf "%s\n%s\n" "$v1" "$v2" | sort -V | head -n1)" = "$v1" ] && exit 0 || exit 1
 fi
 exit 0
 EOF
@@ -160,11 +171,11 @@ EOF
 }
 
 echo "[3/4] Starting Simulated Windows Server: lab-win-dc01 (Vulnerable CVE-2024-38063 & CVE-2021-34527)..."
-docker run -d --name lab-win-dc01 --memory 32m --cpus 0.1 "$IMAGE" sleep infinity >/dev/null
+docker run -d --name lab-win-dc01 --label notaffected.lab=true --label notaffected.os=windows --memory 32m --cpus 0.1 "$IMAGE" sleep infinity >/dev/null
 install_win_shim "lab-win-dc01" "20348.2402" "KB5039217" "0" "Running"
 
 echo "[4/4] Starting Simulated Windows Server: lab-win-filesrv02 (Mitigated CVE-2024-38063 & CVE-2021-34527)..."
-docker run -d --name lab-win-filesrv02 --memory 32m --cpus 0.1 "$IMAGE" sleep infinity >/dev/null
+docker run -d --name lab-win-filesrv02 --label notaffected.lab=true --label notaffected.os=windows --memory 32m --cpus 0.1 "$IMAGE" sleep infinity >/dev/null
 install_win_shim "lab-win-filesrv02" "20348.2402" "KB5039217" "255" "Stopped"
 
 echo "Lab ready: 4 ultra-lightweight containers running."

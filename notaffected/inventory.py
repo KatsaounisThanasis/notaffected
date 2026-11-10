@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -298,3 +300,64 @@ def load_runners(
         runners.append(LocalRunner(timeout=timeout))
 
     return runners
+
+
+def discover_docker_containers(timeout: int = 5) -> list[dict[str, str]]:
+    """Return running Docker containers as `[{'name': ..., 'docker': ..., 'os': 'linux'|'windows'}]`
+    using `docker ps` labels/names without executing commands inside unrelated containers.
+    """
+    try:
+        proc = subprocess.run(
+            ["docker", "ps", "--format", "{{.Names}}\t{{.Labels}}"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=False,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return []
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+    discovered: list[dict[str, str]] = []
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t", 1)
+        cname = parts[0].strip()
+        labels = (parts[1].strip() if len(parts) > 1 else "").lower()
+        if not cname or cname.startswith("-"):
+            continue
+        os_family = "windows" if ("notaffected.os=windows" in labels or "-win-" in cname.lower()) else "linux"
+        discovered.append({"name": cname, "docker": cname, "os": os_family})
+    return discovered
+
+
+def generate_inventory_yaml(discover_docker: bool = False) -> str:
+    """Generate a starter YAML inventory (optionally pre-populated with running Docker containers)."""
+    hosts: list[dict[str, Any]] = [
+        {"name": "localhost", "type": "local", "os": "linux"},
+    ]
+    if discover_docker:
+        hosts.extend(discover_docker_containers())
+
+    header = (
+        "# notaffected fleet inventory\n"
+        "# Supported target types: local, ssh (Linux/Windows OpenSSH), docker, k8s\n"
+    )
+    if len(hosts) == 1:
+        header += (
+            "# Examples:\n"
+            "#   - name: prod-web-01\n"
+            "#     ssh: ubuntu@10.0.1.15\n"
+            "#     os: linux\n"
+            "#   - name: win-dc-01\n"
+            "#     ssh: Administrator@10.0.2.10\n"
+            "#     os: windows\n"
+            "#   - name: api-container\n"
+            "#     docker: my-running-container\n"
+            "#     os: linux\n"
+        )
+    return header + yaml.safe_dump({"hosts": hosts}, sort_keys=False)
+
