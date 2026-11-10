@@ -96,6 +96,13 @@ def _add_target_and_output_args(p: argparse.ArgumentParser) -> None:
         help="Running Docker container name/ID to probe via 'docker exec'",
     )
     p.add_argument(
+        "--win-docker",
+        action="append",
+        dest="win_docker_targets",
+        default=None,
+        help="Running Windows (or simulated Windows) Docker container to probe via PowerShell",
+    )
+    p.add_argument(
         "--k8s",
         action="append",
         dest="k8s_targets",
@@ -200,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
             ssh_targets=args.ssh_targets,
             win_ssh_targets=args.win_ssh_targets,
             docker_targets=args.docker_targets,
+            win_docker_targets=args.win_docker_targets,
             k8s_targets=args.k8s_targets,
             inventory_path=args.inventory,
         )

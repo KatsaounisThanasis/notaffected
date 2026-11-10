@@ -1,0 +1,13 @@
+hosts:
+  - name: lab-ssh-vuln
+    docker: lab-ssh-vuln
+    os: linux
+  - name: lab-ssh-mitigated
+    docker: lab-ssh-mitigated
+    os: linux
+  - name: lab-win-dc01
+    docker: lab-win-dc01
+    os: windows
+  - name: lab-win-filesrv02
+    docker: lab-win-filesrv02
+    os: windows

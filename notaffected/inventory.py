@@ -174,6 +174,7 @@ def load_runners(
     ssh_targets: list[str] | None = None,
     win_ssh_targets: list[str] | None = None,
     docker_targets: list[str] | None = None,
+    win_docker_targets: list[str] | None = None,
     k8s_targets: list[str] | None = None,
     inventory_path: Path | None = None,
     timeout: int = 10,
@@ -278,6 +279,10 @@ def load_runners(
     if docker_targets:
         for container in docker_targets:
             runners.append(DockerRunner(container=container, timeout=timeout))
+
+    if win_docker_targets:
+        for container in win_docker_targets:
+            runners.append(DockerRunner(container=container, timeout=timeout, os_family="windows"))
 
     if k8s_targets:
         for pod_spec in k8s_targets:
