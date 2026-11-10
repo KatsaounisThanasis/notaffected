@@ -19,9 +19,21 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import socket
+import subprocess
+import time
 import urllib.parse
 import urllib.request
 from typing import Any
+
+_CLAUDE_BARE_FLAGS = [
+    "--bare",
+    "--strict-mcp-config",
+    "--tools",
+    "",
+    "--no-session-persistence",
+]
 
 
 def _is_openai_compatible(url: str) -> bool:
@@ -30,9 +42,12 @@ def _is_openai_compatible(url: str) -> bool:
 
 
 def detect_provider() -> str:
-    """Detect which LLM provider to use based on environment variables."""
+    """Detect which LLM provider to use.
+    Defaults strictly to local 'ollama' (127.0.0.1:11434) so zero data leaves the
+    machine unless an external provider or API key is explicitly configured.
+    """
     explicit = (os.environ.get("NOTAFFECTED_LLM_PROVIDER") or "").strip().lower()
-    if explicit in ("gemini", "anthropic", "openai", "ollama"):
+    if explicit in ("ollama", "claude-cli", "agy-cli", "gemini", "anthropic", "openai"):
         return explicit
 
     custom_url = os.environ.get("NOTAFFECTED_LLM_URL") or os.environ.get("NOTAFFECTED_OLLAMA_URL")
@@ -48,11 +63,68 @@ def detect_provider() -> str:
     return "ollama"
 
 
+def _run_claude_cli(prompt: str, model: str | None = None, timeout: int = 60) -> str:
+    chosen_model = model or os.environ.get("NOTAFFECTED_LLM_MODEL")
+    cmd = ["claude", "-p", *_CLAUDE_BARE_FLAGS]
+    if chosen_model:
+        cmd.extend(["--model", chosen_model])
+    try:
+        proc = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=False,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _run_agy_cli(prompt: str, model: str | None = None, timeout: int = 60) -> str:
+    chosen_model = (
+        model
+        or os.environ.get("NOTAFFECTED_LLM_MODEL")
+        or "Gemini 3.8 Flash (Medium)"
+    )
+    cmd = [
+        "agy",
+        "-p",
+        prompt,
+        "--dangerously-skip-permissions",
+        "--sandbox",
+        "--print-timeout",
+        f"{max(1, timeout // 60)}m",
+        "--model",
+        chosen_model,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 15,
+            shell=False,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _build_http_request(
     provider: str,
     prompt: str,
     model: str | None,
     json_format: bool,
+    max_tokens: int = 240,
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
     env_model = os.environ.get("NOTAFFECTED_LLM_MODEL")
     headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -111,12 +183,18 @@ def _build_http_request(
         or os.environ.get("NOTAFFECTED_OLLAMA_URL")
         or "http://localhost:11434/api/generate"
     )
-    chosen_model = model or env_model or "qwen2.5-coder:3b"
+    chosen_model = model or env_model or "qwen2.5-coder:1.5b"
+    cpu_threads = max(4, min(10, (os.cpu_count() or 8) - 4))
     body = {
         "model": chosen_model,
         "prompt": prompt,
         "stream": False,
-        "options": {"temperature": 0},
+        "options": {
+            "temperature": 0,
+            "num_predict": max_tokens,
+            "num_ctx": 1536,
+            "num_thread": cpu_threads,
+        },
     }
     if json_format:
         body["format"] = "json"
@@ -148,15 +226,64 @@ def _extract_response_text(provider: str, resp: dict[str, Any]) -> str:
     return str(resp.get("response", "") or "")
 
 
+def _ensure_ollama_running(url: str) -> None:
+    """If targeting localhost:11434 and ollama daemon is not listening yet, start it in the background."""
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 11434
+    if host not in ("127.0.0.1", "localhost"):
+        return
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return
+    except OSError:
+        pass
+    ollama_bin = shutil.which("ollama") or os.path.expanduser("~/.local/bin/ollama")
+    if not os.path.isfile(ollama_bin):
+        return
+    try:
+        subprocess.Popen(
+            [ollama_bin, "serve"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        for _ in range(10):
+            time.sleep(0.3)
+            try:
+                with socket.create_connection((host, port), timeout=0.3):
+                    return
+            except OSError:
+                continue
+    except OSError:
+        return
+
+
 def generate(
     prompt: str,
     model: str | None = None,
     timeout: int = 60,
     json_format: bool = True,
+    max_tokens: int = 240,
 ) -> str:
     """Query the configured/detected model once. Returns response text or '' on any failure."""
     provider = detect_provider()
-    url, headers, body = _build_http_request(provider, prompt, model, json_format)
+    if provider == "claude-cli":
+        out = _run_claude_cli(prompt, model=model, timeout=timeout)
+        if out:
+            return out
+        if shutil.which("agy"):
+            return _run_agy_cli(prompt, model=None, timeout=timeout)
+        return ""
+    if provider == "agy-cli":
+        return _run_agy_cli(prompt, model=model, timeout=timeout)
+
+    url, headers, body = _build_http_request(
+        provider, prompt, model, json_format, max_tokens=max_tokens
+    )
+    if provider == "ollama":
+        _ensure_ollama_running(url)
     parsed_url = urllib.parse.urlparse(url)
     if parsed_url.scheme not in ("http", "https"):
         return ""

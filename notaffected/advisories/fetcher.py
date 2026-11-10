@@ -67,6 +67,72 @@ def fetch_ubuntu_osv_advisory(
     return fetch_osv_advisory(ubuntu_id, cache_dir=cache_dir, timeout=timeout)
 
 
+def fetch_mitre_cve_as_osv(
+    cve_id: str,
+    cache_dir: Path | None = None,
+    timeout: int = 8,
+) -> dict[str, Any] | None:
+    """Fetch official MITRE CVE v5 record (`cveawg.mitre.org`) and normalize to OSV shape."""
+    norm_id = cve_id.strip().upper()
+    if not norm_id.startswith("CVE-") or not _SAFE_ID_RE.fullmatch(norm_id) or ".." in norm_id:
+        return None
+    cdir = cache_dir or DEFAULT_CACHE_DIR
+    cache_file = cdir / f"MITRE-{norm_id}.json"
+
+    if cache_file.is_file():
+        try:
+            return json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    url = f"https://cveawg.mitre.org/api/cve/{norm_id}"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = json.load(resp)
+        if not isinstance(raw, dict):
+            return None
+        cna = (raw.get("containers") or {}).get("cna") or {}
+        title = str(cna.get("title") or "").strip()
+        descs = cna.get("descriptions") or []
+        eng_desc = ""
+        for d in descs:
+            if isinstance(d, dict) and d.get("value"):
+                eng_desc = str(d["value"]).strip()
+                if str(d.get("lang") or "").startswith("en"):
+                    break
+        severity = "HIGH"
+        for m in cna.get("metrics") or []:
+            if not isinstance(m, dict):
+                continue
+            for k in ("cvssV3_1", "cvssV3_0", "cvssV4_0"):
+                if isinstance(m.get(k), dict) and m[k].get("baseSeverity"):
+                    severity = str(m[k]["baseSeverity"]).upper()
+                    break
+        refs = [
+            {"type": "ADVISORY", "url": str(r.get("url"))}
+            for r in (cna.get("references") or [])
+            if isinstance(r, dict) and r.get("url")
+        ]
+        normalized: dict[str, Any] = {
+            "id": norm_id,
+            "summary": title or eng_desc[:160] or norm_id,
+            "details": eng_desc or title,
+            "affected": [],
+            "references": refs,
+            "database_specific": {"severity": severity},
+        }
+        try:
+            cdir.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+        return normalized
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+        return None
+
+
+
 def fetch_advisories_concurrent(
     cve_ids: list[str],
     cache_dir: Path | None = None,
@@ -140,6 +206,8 @@ def fetch_reference_snippets(
         if not _is_safe_public_https_url(url):
             continue
         host = (urllib.parse.urlparse(url).hostname or "").lower()
+        if host == "msrc.microsoft.com":
+            continue
         ref_type = str(ref.get("type") or "").upper()
         if ref_type in ("ADVISORY", "FIX", "ARTICLE", "REPORT") or any(
             host == dom or host.endswith(f".{dom}")

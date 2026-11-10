@@ -28,33 +28,29 @@ def build_remediation_briefing(
     for v in actionable:
         spec = spec_map.get(v.cve_id)
         patch_str = v.patch.status if v.patch else "unknown"
+        short_reason = v.reason[:180]
+        short_mit = "; ".join(v.mitigation[:2]) or "None"
         findings_lines.append(
-            f"- Host: {v.host} (OS: {v.os_family}) | CVE: {v.cve_id} ({spec.severity if spec else 'HIGH'}) "
-            f"| Status: {v.status.value}\n"
-            f"  Evidence: {v.reason}\n"
-            f"  Patch Status: {patch_str}\n"
-            f"  Candidate Mitigations: {'; '.join(v.mitigation) or 'None'}"
+            f"- {v.host} ({v.os_family}) | {v.cve_id} ({spec.severity if spec else 'HIGH'}) "
+            f"| {v.status.value} | Patch: {patch_str}\n"
+            f"  Proof: {short_reason}\n"
+            f"  Mitigations: {short_mit}"
         )
 
     prompt = (
-        "You are a Principal SecOps Engineer reviewing deterministic vulnerability reachability proofs.\n"
-        "Based ONLY on the host probe evidence below:\n"
-        "1. Rank the affected hosts by immediate exploitability risk.\n"
-        "2. Warn if any candidate temporary mitigation (such as stopping a service or blocking a firewall port) "
-        "could disrupt active workloads shown in the probe evidence, and recommend the safest option first.\n"
-        "3. State whether the permanent patch is ready to install now or requires a temporary workaround.\n"
-        "Keep the output concise (bullet points, plain text).\n\n"
-        "Findings:\n" + "\n".join(findings_lines)
+        "Output ONLY 3 single-line bullets (one per finding below, no intro text, no code blocks): "
+        "[Host/CVE] Risk | Safest mitigation avoiding active service disruption | Patch readiness.\n\n"
+        + "\n".join(findings_lines)
     )
 
-    llm_reply = generate(prompt, timeout=30, json_format=False).strip()
+    llm_reply = generate(prompt, timeout=90, json_format=False, max_tokens=240).strip()
     if llm_reply:
         provider = detect_provider()
         return f"[Provider: {provider}]\n{llm_reply}"
 
     # Deterministic host-aware operational triage when no LLM is reachable
     out_lines: list[str] = [
-        "Structured Operational Triage (deterministic fallback — set GEMINI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY for live LLM synthesis):"
+        "Structured Operational Triage (deterministic fallback — start local `ollama serve` or set NOTAFFECTED_LLM_PROVIDER):"
     ]
     for idx, v in enumerate(actionable, start=1):
         patch_status = v.patch.status if v.patch else "unknown"

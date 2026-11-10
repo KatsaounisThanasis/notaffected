@@ -297,6 +297,13 @@ def test_windows_advisory_heuristics_and_multi_provider_llm(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
     assert local_model.detect_provider() == "anthropic"
 
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("NOTAFFECTED_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("NOTAFFECTED_LLM_PROVIDER", raising=False)
+    # Default must be strictly local 'ollama' so nothing leaves the machine implicitly
+    assert local_model.detect_provider() == "ollama"
+
     # Verify AI remediation briefing works both with LLM and deterministic fallback
     fleet = load_demo_fleet()
     specs = [BUILTIN_SPECS["CVE-2026-98432"], BUILTIN_SPECS["CVE-2024-38063"]]

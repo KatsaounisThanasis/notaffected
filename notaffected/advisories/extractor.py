@@ -11,6 +11,7 @@ from typing import Any
 
 from notaffected.advisories.builtin_specs import BUILTIN_SPECS
 from notaffected.advisories.fetcher import (
+    fetch_mitre_cve_as_osv,
     fetch_osv_advisory,
     fetch_reference_snippets,
     fetch_ubuntu_osv_advisory,
@@ -141,6 +142,9 @@ def resolve_check_spec(
     elif ubuntu_osv and not osv_data:
         osv_data = ubuntu_osv
 
+    if not osv_data:
+        osv_data = fetch_mitre_cve_as_osv(norm_id, cache_dir=cache_dir)
+
     if osv_data:
         return extract_from_osv_payload(
             norm_id,
@@ -213,6 +217,8 @@ def extract_from_osv_payload(
         for phrase in (
             "windows server",
             "microsoft windows",
+            "microsoft message queuing",
+            "active directory",
             "windows 10",
             "windows 11",
             "hklm\\",
@@ -326,9 +332,11 @@ def extract_from_osv_payload(
             ref_snippets = fetch_reference_snippets(osv_data)
             if ref_snippets:
                 enriched_text = f"{full_text}\n\n{ref_snippets}"
-        llm_pres, llm_mitigations = _extract_via_llm(
+        llm_pres, llm_mitigations, llm_os = _extract_via_llm(
             cve_id, enriched_text, os_family=os_family
         )
+        if llm_os in ("linux", "windows") and not is_kernel and not pkg_name:
+            os_family = llm_os
         existing_probes = {_precondition_dedup_key(p) for p in preconditions}
         for lp in llm_pres:
             key = _precondition_dedup_key(lp)
@@ -431,7 +439,7 @@ def _extract_via_llm(
     cve_id: str,
     advisory_text: str,
     os_family: str = "linux",
-) -> tuple[list[Precondition], list[str]]:
+) -> tuple[list[Precondition], list[str], str]:
     """Ask the local/configured LLM to map advisory prose into closed PROBE_TYPES.
     Drops any unrecognized probe type, cross-OS probe, missing required parameter, or malformed entry.
     """
@@ -442,28 +450,56 @@ def _extract_via_llm(
         if probe in allowed_set
     )
     os_label = "Windows Server" if os_family == "windows" else "Linux"
+    if os_family == "windows":
+        example_json = (
+            '{"os_family": "windows", "preconditions": [{"probe": "windows_service_active", '
+            '"params": {"service": "<ServiceName>"}, "description": "Windows service is running", '
+            '"justification_if_not_met": "component_not_present"}], '
+            '"mitigation": ["Stop-Service -Name <ServiceName> -Force"]}'
+        )
+    else:
+        example_json = (
+            '{"os_family": "linux", "preconditions": [{"probe": "systemd_service_active", '
+            '"params": {"service": "<unit>.service"}, "description": "Systemd service is active", '
+            '"justification_if_not_met": "vulnerable_code_not_in_execute_path"}], '
+            '"mitigation": ["sudo systemctl disable --now <unit>.service"]}'
+        )
     prompt = (
-        f"Extract deterministic {os_label} runtime preconditions for {cve_id} from the advisory below.\n"
-        f"Allowed probe types and their required `params` keys ONLY:\n{schema_lines}\n"
-        "Allowed `justification_if_not_met` values: component_not_present, vulnerable_code_not_present, "
+        f"Extract at most 2 deterministic {os_label} runtime preconditions for {cve_id}.\n"
+        "For Microsoft Message Queuing (MSMQ), use service='MSMQ'.\n"
+        f"Allowed probes:\n{schema_lines}\n"
+        "Allowed justification_if_not_met: component_not_present, vulnerable_code_not_present, "
         "vulnerable_code_not_in_execute_path, inline_mitigations_already_exist.\n"
-        "Return strict JSON: {\"preconditions\": [{\"probe\": \"...\", \"params\": {...}, "
-        "\"description\": \"...\", \"justification_if_not_met\": \"...\"}], \"mitigation\": [\"...\"]}.\n\n"
-        f"Advisory:\n{advisory_text[:4000]}"
+        f"Return compact JSON (short descriptions <10 words):\n{example_json}\n\n"
+        f"Advisory:\n{advisory_text[:1000]}"
     )
-    resp = generate_json(prompt)
+    resp = generate_json(prompt, timeout=90)
     if not resp:
-        return [], []
+        return [], [], os_family
+
+    detected_os = str(resp.get("os_family") or os_family).strip().lower()
+    if detected_os not in ("linux", "windows"):
+        detected_os = os_family
+    effective_allowed = WINDOWS_ALLOWED_PROBES if detected_os == "windows" else LINUX_ALLOWED_PROBES
+    valid_justifications = {j.value for j in VexJustification}
 
     valid_preconditions: list[Precondition] = []
     for raw_p in resp.get("preconditions") or []:
         if not isinstance(raw_p, dict):
             continue
         probe_name = str(raw_p.get("probe") or "")
-        if probe_name not in allowed_set:
+        if probe_name not in effective_allowed:
             continue
+        normalized_p = dict(raw_p)
+        just_val = str(normalized_p.get("justification_if_not_met") or "").strip()
+        if just_val not in valid_justifications:
+            normalized_p["justification_if_not_met"] = (
+                VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH.value
+            )
+        if not normalized_p.get("description"):
+            normalized_p["description"] = f"Check {probe_name}"
         try:
-            cand = Precondition.from_dict(raw_p)
+            cand = Precondition.from_dict(normalized_p)
         except (ValueError, KeyError, TypeError):
             continue
         if not validate_precondition_params(cand):
@@ -473,4 +509,4 @@ def _extract_via_llm(
     mitigations = [
         str(m) for m in (resp.get("mitigation") or []) if isinstance(m, str) and m.strip()
     ]
-    return valid_preconditions, mitigations
+    return valid_preconditions, mitigations, detected_os
