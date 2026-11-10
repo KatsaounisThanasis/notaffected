@@ -20,9 +20,7 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
-import time
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -226,40 +224,6 @@ def _extract_response_text(provider: str, resp: dict[str, Any]) -> str:
     return str(resp.get("response", "") or "")
 
 
-def _ensure_ollama_running(url: str) -> None:
-    """If targeting localhost:11434 and ollama daemon is not listening yet, start it in the background."""
-    parsed = urllib.parse.urlparse(url)
-    host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or 11434
-    if host not in ("127.0.0.1", "localhost"):
-        return
-    try:
-        with socket.create_connection((host, port), timeout=0.5):
-            return
-    except OSError:
-        pass
-    ollama_bin = shutil.which("ollama") or os.path.expanduser("~/.local/bin/ollama")
-    if not os.path.isfile(ollama_bin):
-        return
-    try:
-        subprocess.Popen(
-            [ollama_bin, "serve"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        for _ in range(10):
-            time.sleep(0.3)
-            try:
-                with socket.create_connection((host, port), timeout=0.3):
-                    return
-            except OSError:
-                continue
-    except OSError:
-        return
-
-
 def generate(
     prompt: str,
     model: str | None = None,
@@ -282,8 +246,6 @@ def generate(
     url, headers, body = _build_http_request(
         provider, prompt, model, json_format, max_tokens=max_tokens
     )
-    if provider == "ollama":
-        _ensure_ollama_running(url)
     parsed_url = urllib.parse.urlparse(url)
     if parsed_url.scheme not in ("http", "https"):
         return ""
