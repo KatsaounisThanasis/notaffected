@@ -28,7 +28,13 @@ from notaffected.inventory import (
     load_runners,
 )
 from notaffected.model import CheckSpec, VerdictStatus
-from notaffected.probes.runner import DockerRunner, HostRunner, LocalRunner
+from notaffected.probes.runner import (
+    CommandResult,
+    DockerRunner,
+    HostRunner,
+    LocalRunner,
+    MockRunner,
+)
 from notaffected.render.html import build_html_report
 from notaffected.render.vex import build_openvex
 
@@ -36,6 +42,55 @@ MAX_REQUEST_BODY_BYTES = 1_048_576
 MAX_CUSTOM_CVES = 50
 _CVE_TOKEN_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$", re.IGNORECASE)
 _ALLOWED_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+_DEMO_MITIGATED: set[tuple[str, str]] = set()
+_EXEC_MITIGATION_PREFIXES = (
+    "sudo ",
+    "echo ",
+    "set-itemproperty ",
+    "stop-service ",
+    "set-service ",
+)
+
+
+def _is_executable_mitigation(cmd: str) -> bool:
+    low = cmd.strip().lower()
+    return low.startswith(_EXEC_MITIGATION_PREFIXES)
+
+
+def _apply_demo_overrides(runners: list[HostRunner]) -> list[HostRunner]:
+    for r in runners:
+        if not isinstance(r, MockRunner):
+            continue
+        if (r.host_name, "CVE-2024-6387") in _DEMO_MITIGATED:
+            r.responses[("cat", "/etc/ssh/sshd_config")] = CommandResult(
+                0, "PermitRootLogin no\nLoginGraceTime 0\n", ""
+            )
+        if (r.host_name, "CVE-2026-98432") in _DEMO_MITIGATED:
+            r.responses[("ufw", "status", "verbose")] = CommandResult(
+                0,
+                "Status: active\nDefault: deny (incoming), allow (outgoing)\n",
+                "",
+            )
+        if (r.host_name, "CVE-2024-38063") in _DEMO_MITIGATED:
+            ps_reg_ipv6 = (
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters' "
+                "-Name 'DisabledComponents' -ErrorAction Stop).'DisabledComponents'",
+            )
+            r.responses[ps_reg_ipv6] = CommandResult(0, "255\n", "")
+        if (r.host_name, "CVE-2021-34527") in _DEMO_MITIGATED:
+            ps_svc_spooler = (
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-Service -Name 'Spooler' -ErrorAction Stop).Status",
+            )
+            r.responses[ps_svc_spooler] = CommandResult(0, "Stopped\n", "")
+    return runners
 
 
 def _build_runners_for_mode(
@@ -44,7 +99,7 @@ def _build_runners_for_mode(
 ) -> list[HostRunner]:
     mode = (target_mode or "docker_discovered").strip().lower()
     if mode == "demo_fleet":
-        return load_demo_fleet()
+        return _apply_demo_overrides(load_demo_fleet())
     if mode == "local":
         return [LocalRunner()]
     if mode == "lab_inventory":
@@ -71,7 +126,75 @@ def _build_runners_for_mode(
             return load_runners(inventory_path=inv_path)
     if custom_container:
         return [DockerRunner(container=custom_container.strip())]
-    return load_demo_fleet()
+    return _apply_demo_overrides(load_demo_fleet())
+
+
+def apply_host_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
+    """Execute an allowlisted CheckSpec mitigation command on the specified host runner."""
+    target_mode = str(payload.get("target_mode") or "docker_discovered")
+    host = str(payload.get("host") or "").strip()
+    cve_id = str(payload.get("cve_id") or "").strip().upper()
+    try:
+        mit_idx = int(payload.get("mitigation_index", 0))
+    except (ValueError, TypeError):
+        mit_idx = -1
+
+    if not host or not _CVE_TOKEN_RE.match(cve_id) or mit_idx < 0:
+        return {"ok": False, "error": "Invalid host, CVE ID, or mitigation index"}
+
+    spec = resolve_check_spec(cve_id, use_llm=False)
+    if mit_idx >= len(spec.mitigation):
+        return {"ok": False, "error": f"Mitigation index {mit_idx} out of range for {cve_id}"}
+
+    cmd_text = spec.mitigation[mit_idx]
+    if not _is_executable_mitigation(cmd_text):
+        return {
+            "ok": False,
+            "error": "Selected mitigation is an advisory instruction, not a direct command.",
+        }
+
+    runners = _build_runners_for_mode(target_mode)
+    runner = next((r for r in runners if r.host_name == host), None)
+    if runner is None:
+        return {"ok": False, "error": f"Target host {host!r} not found in {target_mode!r}"}
+
+    if isinstance(runner, MockRunner):
+        _DEMO_MITIGATED.add((host, cve_id))
+        return {
+            "ok": True,
+            "host": host,
+            "cve_id": cve_id,
+            "command": cmd_text,
+            "output": f"Applied mitigation on simulated host {host}.",
+        }
+
+    os_family = getattr(runner, "os_family", "linux")
+    if os_family == "windows":
+        res = runner.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd_text]
+        )
+    else:
+        exec_cmd = cmd_text
+        if isinstance(runner, DockerRunner):
+            if "LoginGraceTime 0" in exec_cmd and "/etc/ssh/sshd_config" in exec_cmd:
+                exec_cmd = "echo 'LoginGraceTime 0' >> /etc/ssh/sshd_config"
+            else:
+                exec_cmd = re.sub(r"\bsudo\s+", "", exec_cmd)
+        res = runner.run(["sh", "-c", exec_cmd])
+
+    if hasattr(runner, "_cache") and isinstance(runner._cache, dict):
+        runner._cache.clear()
+
+    ok = res.returncode == 0 and not res.transport_error
+    output_text = (res.stdout or res.stderr or "").strip()
+    return {
+        "ok": ok,
+        "host": host,
+        "cve_id": cve_id,
+        "command": cmd_text,
+        "output": output_text or ("Command succeeded." if ok else f"Exit code {res.returncode}"),
+        "error": None if ok else (output_text or f"Command failed with exit code {res.returncode}"),
+    }
 
 
 def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
@@ -649,13 +772,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           : `Patch: <strong>${esc(v.patch ? v.patch.status : "unknown")}</strong>` +
             (v.patch && v.patch.fixed_version ? ` (<code>${esc(v.patch.fixed_version)}</code>)` : "");
         const mitigationsHtml = (v.status === "affected" && v.mitigation && v.mitigation.length > 0)
-          ? v.mitigation.map((m) => `
-              <div class="mit-row">
-                <code class="mit-cmd">$ ${esc(m)}</code>
-                <button type="button" class="mini" data-copy-cmd="${esc(m)}">Copy</button>
-                <button type="button" class="mini" data-reverify="1">Re-Verify</button>
-              </div>
-            `).join("")
+          ? v.mitigation.map((m, idx) => {
+              const low = String(m || "").trim().toLowerCase();
+              const canRun = (
+                low.startsWith("sudo ") ||
+                low.startsWith("echo ") ||
+                low.startsWith("set-itemproperty ") ||
+                low.startsWith("stop-service ") ||
+                low.startsWith("set-service ")
+              );
+              const runBtn = canRun
+                ? `<button type="button" class="mini primary" data-apply-host="${esc(v.host)}" data-apply-cve="${esc(v.cve_id)}" data-apply-idx="${idx}" data-apply-cmd="${esc(m)}">Run Mitigation</button>`
+                : "";
+              return `
+                <div class="mit-row">
+                  <code class="mit-cmd">$ ${esc(m)}</code>
+                  ${runBtn}
+                  <button type="button" class="mini" data-copy-cmd="${esc(m)}">Copy</button>
+                </div>
+              `;
+            }).join("")
           : "";
         return `
           <tr>
@@ -745,8 +881,43 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
         return;
       }
-      if (btn.getAttribute("data-reverify")) {
-        runEvaluation();
+      const applyHost = btn.getAttribute("data-apply-host");
+      if (applyHost) {
+        const applyCve = btn.getAttribute("data-apply-cve");
+        const applyIdx = Number(btn.getAttribute("data-apply-idx") || "0");
+        const applyCmd = btn.getAttribute("data-apply-cmd") || "";
+        const okConfirm = window.confirm(
+          `Execute mitigation on host '${applyHost}' for ${applyCve}?\n\n$ ${applyCmd}`
+        );
+        if (!okConfirm) return;
+        btn.disabled = true;
+        btn.textContent = "Running...";
+        try {
+          const res = await fetch("/api/mitigate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              target_mode: document.getElementById("targetMode").value,
+              host: applyHost,
+              cve_id: applyCve,
+              mitigation_index: applyIdx,
+            }),
+          });
+          const data = await res.json();
+          if (data.ok) {
+            document.getElementById("feedBanner").textContent =
+              `Mitigation executed on ${applyHost} (${applyCve}). Re-verifying host reachability...`;
+            await runEvaluation();
+          } else {
+            window.alert("Mitigation failed: " + (data.error || "Unknown error"));
+            btn.disabled = false;
+            btn.textContent = "Run Mitigation";
+          }
+        } catch (err) {
+          window.alert("Error executing mitigation: " + err);
+          btn.disabled = false;
+          btn.textContent = "Run Mitigation";
+        }
       }
     });
 
@@ -848,7 +1019,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             )
             return
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path != "/api/evaluate":
+        if parsed.path not in ("/api/evaluate", "/api/mitigate"):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
         try:
@@ -868,6 +1039,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("Expected JSON object")
         except Exception as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"Invalid JSON: {exc}"})
+            return
+
+        if parsed.path == "/api/mitigate":
+            mit_res = apply_host_mitigation(payload)
+            status = HTTPStatus.OK if mit_res.get("ok") else HTTPStatus.BAD_REQUEST
+            self._send_json(status, mit_res)
             return
 
         result = evaluate_dashboard_request(payload)

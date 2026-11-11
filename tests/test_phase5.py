@@ -22,7 +22,9 @@ from notaffected.cli import main
 from notaffected.inventory import generate_inventory_yaml
 from notaffected.probes.runner import CommandResult, MockRunner
 from notaffected.web import (
+    _DEMO_MITIGATED,
     DashboardRequestHandler,
+    apply_host_mitigation,
     evaluate_dashboard_request,
     get_targets_metadata,
 )
@@ -202,6 +204,7 @@ def test_generate_inventory_yaml_structure() -> None:
 
 
 def test_web_dashboard_scanner_json_mode() -> None:
+    _DEMO_MITIGATED.clear()
     sample_trivy = {
         "Results": [
             {
@@ -229,4 +232,53 @@ def test_web_dashboard_scanner_json_mode() -> None:
     assert res["summary"]["cves_evaluated"] == 1
     assert res["summary"]["hosts_evaluated"] == 5
     assert res["summary"]["affected"] == 1
+
+
+def test_apply_host_mitigation_flips_verdict_to_not_affected() -> None:
+    _DEMO_MITIGATED.clear()
+    try:
+        before = evaluate_dashboard_request(
+            {
+                "target_mode": "demo_fleet",
+                "scan_mode": "custom_cves",
+                "cves": "CVE-2024-6387",
+                "offline": True,
+            }
+        )
+        assert before["summary"]["affected"] == 1
+
+        mit_res = apply_host_mitigation(
+            {
+                "target_mode": "demo_fleet",
+                "host": "prod-edge-api-01",
+                "cve_id": "CVE-2024-6387",
+                "mitigation_index": 0,
+            }
+        )
+        assert mit_res["ok"] is True
+
+        after = evaluate_dashboard_request(
+            {
+                "target_mode": "demo_fleet",
+                "scan_mode": "custom_cves",
+                "cves": "CVE-2024-6387",
+                "offline": True,
+            }
+        )
+        assert after["summary"]["affected"] == 0
+        assert after["summary"]["not_affected"] == 5
+
+        # Non-command prose mitigation must be rejected safely
+        non_exec = apply_host_mitigation(
+            {
+                "target_mode": "demo_fleet",
+                "host": "prod-edge-api-01",
+                "cve_id": "CVE-2026-98432",
+                "mitigation_index": 2,
+            }
+        )
+        assert non_exec["ok"] is False
+    finally:
+        _DEMO_MITIGATED.clear()
+
 
