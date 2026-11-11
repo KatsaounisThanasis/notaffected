@@ -21,6 +21,7 @@ from notaffected.advisories.extractor import resolve_check_spec
 from notaffected.advisories.fetcher import fetch_advisories_concurrent
 from notaffected.advisories.live_feed import collect_scan_specs
 from notaffected.engine.evaluator import evaluate_fleet
+from notaffected.importers.scanners import parse_scanner_json
 from notaffected.inventory import (
     discover_docker_containers,
     load_demo_fleet,
@@ -113,6 +114,42 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
         specs: list[CheckSpec] = [
             resolve_check_spec(cid, use_llm=use_llm) for cid in cve_list
         ]
+        feed_meta["total_cves"] = len(specs)
+    elif scan_mode == "scanner_json":
+        raw_report = payload.get("scanner_report")
+        sample_path = Path("examples/trivy-scan.json")
+        try:
+            if isinstance(raw_report, (dict, str)) and raw_report:
+                findings = parse_scanner_json(raw_report)
+            elif sample_path.is_file():
+                findings = parse_scanner_json(sample_path)
+            else:
+                findings = []
+        except Exception:
+            findings = []
+        non_builtin = [
+            f.cve_id
+            for f in findings[:MAX_CUSTOM_CVES]
+            if not offline and f.cve_id.strip().upper() not in BUILTIN_SPECS
+        ]
+        if len(non_builtin) > 1:
+            fetch_advisories_concurrent(non_builtin)
+        specs = []
+        seen_cves: set[str] = set()
+        for f in findings:
+            if f.cve_id in seen_cves or len(specs) >= MAX_CUSTOM_CVES:
+                continue
+            seen_cves.add(f.cve_id)
+            specs.append(
+                resolve_check_spec(
+                    f.cve_id,
+                    use_llm=use_llm,
+                    package_hint=f.package_name,
+                    fixed_version_hint=f.fixed_version,
+                )
+            )
+        if not specs:
+            specs = list(BUILTIN_SPECS.values())
         feed_meta["total_cves"] = len(specs)
     else:
         specs, feed_meta = collect_scan_specs(
@@ -386,16 +423,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       font-size: 0.85rem;
       margin: 0;
     }
+    .mit-row {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      margin-top: 0.35rem;
+      flex-wrap: wrap;
+    }
     .mit-cmd {
+      flex: 1;
       display: block;
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 0.35rem 0.6rem;
-      margin-top: 0.35rem;
       font-family: ui-monospace, SFMono-Regular, monospace;
       font-size: 0.8rem;
       color: #bae6fd;
+    }
+    button.mini {
+      padding: 0.25rem 0.55rem;
+      font-size: 0.75rem;
+      border-radius: 6px;
     }
     .feed-banner {
       font-size: 0.84rem;
@@ -436,12 +485,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <select id="scanMode">
           <option value="live_scan">Auto-Scan (Built-in + Live OSV Packages + CISA KEV Feed)</option>
           <option value="custom_cves">Specific CVE ID(s)</option>
+          <option value="scanner_json">Filter Trivy / Grype JSON Report</option>
         </select>
       </div>
 
       <div class="field" id="customCveField" style="display:none;">
         <label for="cveInput">CVE IDs (comma or space separated)</label>
         <input type="text" id="cveInput" placeholder="e.g. CVE-2024-6387, CVE-2024-38063, CVE-2021-34527" value="CVE-2024-6387, CVE-2024-38063, CVE-2021-34527" />
+      </div>
+
+      <div class="field" id="scannerJsonField" style="display:none;">
+        <label for="scannerFileInput">Trivy / Grype JSON File (leave empty for examples/trivy-scan.json)</label>
+        <input type="file" id="scannerFileInput" accept=".json,application/json" style="color:var(--muted); font-size:0.85rem;" />
       </div>
 
       <div class="btn-row">
@@ -541,6 +596,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     document.getElementById("scanMode").addEventListener("change", (e) => {
       document.getElementById("customCveField").style.display =
         e.target.value === "custom_cves" ? "block" : "none";
+      document.getElementById("scannerJsonField").style.display =
+        e.target.value === "scanner_json" ? "block" : "none";
     });
 
     async function loadMeta() {
@@ -592,7 +649,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           : `Patch: <strong>${esc(v.patch ? v.patch.status : "unknown")}</strong>` +
             (v.patch && v.patch.fixed_version ? ` (<code>${esc(v.patch.fixed_version)}</code>)` : "");
         const mitigationsHtml = (v.status === "affected" && v.mitigation && v.mitigation.length > 0)
-          ? v.mitigation.map((m) => `<code class="mit-cmd">$ ${esc(m)}</code>`).join("")
+          ? v.mitigation.map((m) => `
+              <div class="mit-row">
+                <code class="mit-cmd">$ ${esc(m)}</code>
+                <button type="button" class="mini" data-copy-cmd="${esc(m)}">Copy</button>
+                <button type="button" class="mini" data-reverify="1">Re-Verify</button>
+              </div>
+            `).join("")
           : "";
         return `
           <tr>
@@ -622,6 +685,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         cves: document.getElementById("cveInput").value,
         offline: document.getElementById("chkOffline").checked,
       };
+      if (body.scan_mode === "scanner_json") {
+        const fileEl = document.getElementById("scannerFileInput");
+        if (fileEl && fileEl.files && fileEl.files.length > 0) {
+          body.scanner_report = await fileEl.files[0].text();
+        }
+      }
 
       try {
         const res = await fetch("/api/evaluate", {
@@ -660,6 +729,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     document.getElementById("filterStatus").addEventListener("change", renderVerdictRows);
     document.getElementById("filterOs").addEventListener("change", renderVerdictRows);
     document.getElementById("filterSearch").addEventListener("input", renderVerdictRows);
+
+    document.getElementById("verdictsBody").addEventListener("click", async (e) => {
+      const btn = e.target.closest("button");
+      if (!btn) return;
+      const copyCmd = btn.getAttribute("data-copy-cmd");
+      if (copyCmd) {
+        try {
+          await navigator.clipboard.writeText(copyCmd);
+          const orig = btn.textContent;
+          btn.textContent = "Copied!";
+          setTimeout(() => { btn.textContent = orig; }, 1200);
+        } catch (err) {
+          console.error(err);
+        }
+        return;
+      }
+      if (btn.getAttribute("data-reverify")) {
+        runEvaluation();
+      }
+    });
 
     document.getElementById("btnExportVex").addEventListener("click", () => {
       if (!latestResult) return;

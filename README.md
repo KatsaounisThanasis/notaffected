@@ -19,11 +19,11 @@ Every week dozens of new CVEs are published, and AI-assisted research is finding
 
 ```mermaid
 flowchart LR
-    A["CVE ID / Trivy / Grype JSON"] --> B["Advisory Extractor\n(Built-in + OSV / Ubuntu OSV + Optional LLM)"]
+    A["Live Feeds (CISA KEV + OSV Batch)\nor CVE IDs / Trivy / Grype JSON"] --> B["Advisory Extractor\n(Built-in + OSV / MITRE + Optional Local LLM)"]
     B --> C["CheckSpec\n(Closed 12-Probe DSL)"]
     C --> D["Read-Only Probes\n(Linux / Windows SSH / Docker / K8s)"]
     D --> E["Three-Valued Engine\n(MET / NOT_MET / UNKNOWN)"]
-    E --> F["Rich Terminal + Mitigations + --ai-explain"]
+    E --> F["Web UI (127.0.0.1:8484) &\nRich Terminal + --ai-explain"]
     E --> G["OpenVEX v0.2.0 (.vex.json)"]
     E --> H["Standalone HTML Report (.html)"]
 ```
@@ -57,36 +57,62 @@ uv venv && uv pip install -e ".[dev]"
 
 ## Quick Start
 
-### 1. Inspect extracted preconditions & mitigations for a CVE
+### 1. Launch the Local Web Dashboard (`notaffected ui`)
 ```bash
-notaffected spec CVE-2026-98432
+notaffected ui --port 8484
+# Open http://127.0.0.1:8484 in your browser
+```
+From the Web Dashboard you can:
+- Auto-discover running Docker containers, load `inventory.yaml`, or inspect the simulated Linux + Windows Server fleet.
+- Run **Auto-Scan** (combines built-in rules + live OSV `/v1/querybatch` package queries + live CISA KEV actively exploited CVEs), check specific CVE IDs, or upload a **Trivy / Grype JSON report**.
+- Copy temporary mitigations with 1 click, click **Re-Verify** after applying a mitigation, and download **OpenVEX v0.2.0 (`.vex.json`)**, **Audit JSON**, or a **Standalone HTML Report**.
+
+### 2. Zero-Argument Auto-Scan & Fleet Initialization
+```bash
+# Auto-generate an inventory file (discovering running Docker containers)
+notaffected init --discover-docker -o inventory.yaml
+
+# Scan your fleet against built-in rules, live OSV package batch API, and CISA KEV feed
+notaffected scan -i inventory.yaml --emit-vex vex.json --html report.html
 ```
 
-### 2. Check the local machine or a 3-host simulated fleet
+### 3. Inspect extracted preconditions & mitigations for any CVE
+```bash
+notaffected spec CVE-2026-98432
+notaffected spec CVE-2024-30080 --llm
+```
+
+### 4. Check specific CVEs across local, SSH, Docker, or Kubernetes targets
 ```bash
 # Live check on your local Linux machine
 notaffected check CVE-2026-98432 CVE-2024-47176 CVE-2022-47942 --host local
 
 # Run against the built-in 5-host mixed Linux + Windows Server demo fleet
 notaffected check CVE-2026-98432 CVE-2024-38063 CVE-2021-34527 --demo-fleet --ai-explain --emit-vex vex.json --html report.html
+
+# Linux and Windows OpenSSH targets or running Docker / Kubernetes workloads
+notaffected check CVE-2024-6387 CVE-2024-38063 --ssh ubuntu@10.0.0.10 --win-ssh Administrator@10.0.1.50
+notaffected check CVE-2024-6387 --docker lab-ssh-vuln --win-docker lab-win-dc01 --k8s prod/worker-pod-0
 ```
 
-### 3. Check remote Linux/Windows SSH hosts, Docker containers, or Kubernetes pods
+### 5. Filter an existing Trivy or Grype JSON scan report
 ```bash
-# Linux and Windows OpenSSH targets or YAML inventory
-notaffected check CVE-2026-98432 CVE-2024-38063 --ssh ubuntu@10.0.0.10 --win-ssh Administrator@10.0.1.50 -i hosts.yml
-
-# Running Docker containers or Kubernetes pods
-notaffected check CVE-2024-47176 --docker api-container --k8s prod/worker-pod-0
-```
-
-### 4. Filter an existing Trivy or Grype JSON scan report
-```bash
-notaffected filter fixtures/trivy_ubuntu_sample.json --host local --emit-vex vex.json --html report.html
+notaffected filter examples/trivy-scan.json -i lab/inventory.yaml --emit-vex vex.json --html report.html
 
 # Feed the generated OpenVEX file back into Trivy to silence proven non-issues:
 trivy rootfs --vex vex.json /
 ```
+
+### 6. Local Docker Simulation Lab (`lab/`)
+Spin up 4 ultra-lightweight containers (< 2 MB RAM total, 0% idle CPU) simulating vulnerable & mitigated Linux (`CVE-2024-6387`) and Windows Server (`CVE-2024-38063`, `CVE-2021-34527`) targets:
+```bash
+./lab/setup_lab.sh
+notaffected scan -i lab/inventory.yaml
+./lab/teardown_lab.sh
+```
+
+### 7. Optional Local-First AI Configuration
+By default, `--llm` and `--ai-explain` target **local Ollama (`127.0.0.1:11434`)** so zero data leaves your machine unless an external provider (`NOTAFFECTED_LLM_PROVIDER=claude-cli|agy-cli|gemini|anthropic|openai`) or API key is explicitly configured.
 
 ---
 

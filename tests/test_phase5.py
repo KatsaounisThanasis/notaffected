@@ -199,3 +199,34 @@ def test_generate_inventory_yaml_structure() -> None:
     text = generate_inventory_yaml(discover_docker=False)
     assert "localhost" in text
     assert "hosts:" in text
+
+
+def test_web_dashboard_scanner_json_mode() -> None:
+    sample_trivy = {
+        "Results": [
+            {
+                "Target": "ubuntu",
+                "Vulnerabilities": [
+                    {
+                        "VulnerabilityID": "CVE-2024-6387",
+                        "PkgName": "openssh-server",
+                        "InstalledVersion": "1:9.6p1-3ubuntu13",
+                        "FixedVersion": "1:9.6p1-3ubuntu13.3",
+                        "Severity": "CRITICAL",
+                    }
+                ],
+            }
+        ]
+    }
+    res = evaluate_dashboard_request(
+        {
+            "target_mode": "demo_fleet",
+            "scan_mode": "scanner_json",
+            "scanner_report": sample_trivy,
+            "offline": True,
+        }
+    )
+    assert res["summary"]["cves_evaluated"] == 1
+    assert res["summary"]["hosts_evaluated"] == 5
+    assert res["summary"]["affected"] == 1
+
