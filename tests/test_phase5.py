@@ -20,13 +20,15 @@ from notaffected.advisories.live_feed import (
 )
 from notaffected.cli import main
 from notaffected.inventory import generate_inventory_yaml
-from notaffected.probes.runner import CommandResult, MockRunner
+from notaffected.probes.runner import CommandResult, DockerRunner, MockRunner, SSHRunner
 from notaffected.web import (
     _DEMO_MITIGATED,
     DashboardRequestHandler,
+    _build_runners_for_mode,
     apply_host_mitigation,
     evaluate_dashboard_request,
     get_targets_metadata,
+    reset_lab_and_demo,
 )
 
 
@@ -280,5 +282,40 @@ def test_apply_host_mitigation_flips_verdict_to_not_affected() -> None:
         assert non_exec["ok"] is False
     finally:
         _DEMO_MITIGATED.clear()
+
+
+def test_reset_lab_and_custom_target_runner() -> None:
+    _DEMO_MITIGATED.add(("prod-edge-api-01", "CVE-2024-6387"))
+    res = reset_lab_and_demo()
+    assert res["ok"] is True
+    assert "demo_fleet" in res["reset_targets"]
+    assert len(_DEMO_MITIGATED) == 0
+
+    r_docker = _build_runners_for_mode(
+        "custom_target",
+        custom_target_type="docker_linux",
+        custom_target_value="lab-ssh-vuln",
+    )
+    assert len(r_docker) == 1
+    assert isinstance(r_docker[0], DockerRunner)
+    assert r_docker[0].host_name == "lab-ssh-vuln"
+
+    r_ssh_win = _build_runners_for_mode(
+        "custom_target",
+        custom_target_type="ssh_windows",
+        custom_target_value="Administrator@10.0.0.50",
+    )
+    assert len(r_ssh_win) == 1
+    assert isinstance(r_ssh_win[0], SSHRunner)
+    assert r_ssh_win[0].os_family == "windows"
+
+    # Reject flag-injection target strings starting with '-'
+    r_unsafe = _build_runners_for_mode(
+        "custom_target",
+        custom_target_type="ssh_linux",
+        custom_target_value="-oProxyCommand=evil",
+    )
+    assert all(r.host_name != "-oProxyCommand=evil" for r in r_unsafe)
+
 
 

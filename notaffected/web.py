@@ -34,6 +34,7 @@ from notaffected.probes.runner import (
     HostRunner,
     LocalRunner,
     MockRunner,
+    SSHRunner,
 )
 from notaffected.render.html import build_html_report
 from notaffected.render.vex import build_openvex
@@ -41,6 +42,7 @@ from notaffected.render.vex import build_openvex
 MAX_REQUEST_BODY_BYTES = 1_048_576
 MAX_CUSTOM_CVES = 50
 _CVE_TOKEN_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$", re.IGNORECASE)
+_SAFE_TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$")
 _ALLOWED_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 _DEMO_MITIGATED: set[tuple[str, str]] = set()
 _EXEC_MITIGATION_PREFIXES = (
@@ -96,12 +98,22 @@ def _apply_demo_overrides(runners: list[HostRunner]) -> list[HostRunner]:
 def _build_runners_for_mode(
     target_mode: str,
     custom_container: str | None = None,
+    custom_target_type: str | None = None,
+    custom_target_value: str | None = None,
 ) -> list[HostRunner]:
     mode = (target_mode or "docker_discovered").strip().lower()
     if mode == "demo_fleet":
         return _apply_demo_overrides(load_demo_fleet())
     if mode == "local":
         return [LocalRunner()]
+    if mode == "custom_target":
+        val = (custom_target_value or "").strip()
+        ttype = (custom_target_type or "docker_linux").strip().lower()
+        if val and _SAFE_TARGET_RE.match(val):
+            os_fam = "windows" if "windows" in ttype else "linux"
+            if ttype.startswith("ssh"):
+                return [SSHRunner(target=val, host_name=val, os_family=os_fam)]
+            return [DockerRunner(container=val, host_name=val, os_family=os_fam)]
     if mode == "lab_inventory":
         inv_path = Path("lab/inventory.yaml")
         if inv_path.is_file():
@@ -129,9 +141,35 @@ def _build_runners_for_mode(
     return _apply_demo_overrides(load_demo_fleet())
 
 
+def reset_lab_and_demo() -> dict[str, Any]:
+    """Reset in-memory demo fleet mitigations and restore lab containers to initial vulnerable state."""
+    _DEMO_MITIGATED.clear()
+    reset_targets: list[str] = ["demo_fleet"]
+
+    containers = {c["docker"] for c in discover_docker_containers()}
+    if "lab-ssh-vuln" in containers:
+        r_ssh = DockerRunner(container="lab-ssh-vuln", host_name="lab-ssh-vuln", os_family="linux")
+        res = r_ssh.run(
+            ["sh", "-c", "printf 'Port 22\\nPermitRootLogin no\\nLoginGraceTime 120\\n' > /etc/ssh/sshd_config"]
+        )
+        if res.returncode == 0 and not res.transport_error:
+            reset_targets.append("lab-ssh-vuln")
+    if "lab-win-dc01" in containers:
+        r_win = DockerRunner(container="lab-win-dc01", host_name="lab-win-dc01", os_family="windows")
+        res = r_win.run(
+            ["sh", "-c", "echo '0' > /etc/win-sim/DisabledComponents && echo 'Running' > /etc/win-sim/Spooler"]
+        )
+        if res.returncode == 0 and not res.transport_error:
+            reset_targets.append("lab-win-dc01")
+
+    return {"ok": True, "reset_targets": reset_targets}
+
+
 def apply_host_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
     """Execute an allowlisted CheckSpec mitigation command on the specified host runner."""
     target_mode = str(payload.get("target_mode") or "docker_discovered")
+    custom_target_type = str(payload.get("custom_target_type") or "")
+    custom_target_value = str(payload.get("custom_target_value") or "")
     host = str(payload.get("host") or "").strip()
     cve_id = str(payload.get("cve_id") or "").strip().upper()
     try:
@@ -153,7 +191,11 @@ def apply_host_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
             "error": "Selected mitigation is an advisory instruction, not a direct command.",
         }
 
-    runners = _build_runners_for_mode(target_mode)
+    runners = _build_runners_for_mode(
+        target_mode,
+        custom_target_type=custom_target_type,
+        custom_target_value=custom_target_value,
+    )
     runner = next((r for r in runners if r.host_name == host), None)
     if runner is None:
         return {"ok": False, "error": f"Target host {host!r} not found in {target_mode!r}"}
@@ -200,11 +242,17 @@ def apply_host_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
 def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
     """Execute a dashboard scan or targeted CVE check and return JSON-serializable results."""
     target_mode = str(payload.get("target_mode") or "docker_discovered")
+    custom_target_type = str(payload.get("custom_target_type") or "")
+    custom_target_value = str(payload.get("custom_target_value") or "")
     scan_mode = str(payload.get("scan_mode") or "live_scan")
     offline = bool(payload.get("offline", False))
     use_llm = bool(payload.get("use_llm", False))
 
-    runners = _build_runners_for_mode(target_mode)
+    runners = _build_runners_for_mode(
+        target_mode,
+        custom_target_type=custom_target_type,
+        custom_target_value=custom_target_value,
+    )
 
     feed_meta: dict[str, Any] = {
         "builtin_count": len(BUILTIN_SPECS),
@@ -600,7 +648,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <option value="custom_inventory">Custom Inventory (inventory.yaml)</option>
           <option value="demo_fleet">Simulated Demo Fleet (3 Linux + 2 Windows Server)</option>
           <option value="local">Local Machine (localhost)</option>
+          <option value="custom_target">Custom Target (Single Docker Container / SSH Host)</option>
         </select>
+      </div>
+
+      <div class="field" id="customTargetField" style="display:none;">
+        <label for="customTargetValue">Custom Target Type &amp; Address</label>
+        <div style="display:flex; gap:0.5rem;">
+          <select id="customTargetType" style="width:48%;">
+            <option value="docker_linux">Docker (Linux)</option>
+            <option value="docker_windows">Docker (Win-Sim)</option>
+            <option value="ssh_linux">SSH (Linux)</option>
+            <option value="ssh_windows">SSH (Windows)</option>
+          </select>
+          <input type="text" id="customTargetValue" placeholder="e.g. lab-ssh-vuln or ubuntu@10.0.0.15" value="lab-ssh-vuln" style="width:52%;" />
+        </div>
       </div>
 
       <div class="field">
@@ -624,6 +686,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       <div class="btn-row">
         <button class="primary" id="btnRun">Run Reachability Proof</button>
+        <button id="btnResetLab" title="Restore Demo Fleet and Docker Lab containers to initial vulnerable state">Reset Lab / Demo</button>
         <label style="font-size:0.84rem; color:var(--muted); display:flex; align-items:center; gap:0.35rem;">
           <input type="checkbox" id="chkOffline" /> Offline Only (Skip Live Feeds)
         </label>
@@ -715,6 +778,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       a.remove();
       URL.revokeObjectURL(url);
     }
+
+    document.getElementById("targetMode").addEventListener("change", (e) => {
+      document.getElementById("customTargetField").style.display =
+        e.target.value === "custom_target" ? "block" : "none";
+    });
 
     document.getElementById("scanMode").addEventListener("change", (e) => {
       document.getElementById("customCveField").style.display =
@@ -817,6 +885,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       const body = {
         target_mode: document.getElementById("targetMode").value,
+        custom_target_type: document.getElementById("customTargetType").value,
+        custom_target_value: document.getElementById("customTargetValue").value,
         scan_mode: document.getElementById("scanMode").value,
         cves: document.getElementById("cveInput").value,
         offline: document.getElementById("chkOffline").checked,
@@ -862,6 +932,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     document.getElementById("btnRun").addEventListener("click", runEvaluation);
+    document.getElementById("btnResetLab").addEventListener("click", async () => {
+      const btn = document.getElementById("btnResetLab");
+      btn.disabled = true;
+      btn.textContent = "Resetting...";
+      try {
+        await fetch("/api/reset", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        document.getElementById("feedBanner").textContent =
+          "Restored Demo Fleet and Docker Lab containers to initial vulnerable state. Re-evaluating...";
+        await runEvaluation();
+      } catch (err) {
+        window.alert("Error resetting lab: " + err);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Reset Lab / Demo";
+      }
+    });
     document.getElementById("filterStatus").addEventListener("change", renderVerdictRows);
     document.getElementById("filterOs").addEventListener("change", renderVerdictRows);
     document.getElementById("filterSearch").addEventListener("input", renderVerdictRows);
@@ -898,6 +988,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               target_mode: document.getElementById("targetMode").value,
+              custom_target_type: document.getElementById("customTargetType").value,
+              custom_target_value: document.getElementById("customTargetValue").value,
               host: applyHost,
               cve_id: applyCve,
               mitigation_index: applyIdx,
@@ -1019,7 +1111,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             )
             return
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in ("/api/evaluate", "/api/mitigate"):
+        if parsed.path not in ("/api/evaluate", "/api/mitigate", "/api/reset"):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
         try:
@@ -1039,6 +1131,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 raise ValueError("Expected JSON object")
         except Exception as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"Invalid JSON: {exc}"})
+            return
+
+        if parsed.path == "/api/reset":
+            self._send_json(HTTPStatus.OK, reset_lab_and_demo())
             return
 
         if parsed.path == "/api/mitigate":

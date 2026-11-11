@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "notaffected"
 dynamic = ["version"]
-description = "Deterministically prove whether a CVE actually affects your Linux hosts and emit OpenVEX."
+description = "Deterministically prove whether CVEs actually affect Linux & Windows Server hosts and emit OpenVEX v0.2.0."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
