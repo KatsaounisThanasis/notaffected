@@ -41,6 +41,6 @@ jobs:
 
       - name: Smoke test CLI demo & OpenVEX export
         run: |
-          notaffected demo --vex /tmp/demo.vex.json --html /tmp/demo.html
+          notaffected scan --demo-fleet --offline --emit-vex /tmp/demo.vex.json --html /tmp/demo.html
           test -s /tmp/demo.vex.json
           test -s /tmp/demo.html
