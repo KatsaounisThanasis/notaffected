@@ -63,9 +63,9 @@ notaffected ui --port 8484
 # Open http://127.0.0.1:8484 in your browser
 ```
 From the Web Dashboard you can:
-- Auto-discover running Docker containers, load `inventory.yaml`, or inspect the simulated Linux + Windows Server fleet.
+- Auto-discover running Docker containers, load `inventory.yaml`, select a single custom Docker/SSH target, or inspect the simulated Linux + Windows Server fleet.
 - Run **Auto-Scan** (combines built-in rules + live OSV `/v1/querybatch` package queries + live CISA KEV actively exploited CVEs), check specific CVE IDs, or upload a **Trivy / Grype JSON report**.
-- Copy temporary mitigations with 1 click, click **Re-Verify** after applying a mitigation, and download **OpenVEX v0.2.0 (`.vex.json`)**, **Audit JSON**, or a **Standalone HTML Report**.
+- Execute allowlisted temporary mitigations directly from the UI via **Run Mitigation** (with automatic host re-verification that flips `AFFECTED` rows to `NOT AFFECTED` live), reset the lab via **Reset Lab / Demo**, and download **OpenVEX v0.2.0 (`.vex.json`)**, **Audit JSON**, or a **Standalone HTML Report**.
 
 ### 2. Zero-Argument Auto-Scan & Fleet Initialization
 ```bash
