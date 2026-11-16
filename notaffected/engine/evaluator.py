@@ -38,6 +38,18 @@ def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
             patch=spec.patch,
             os_family=host_os,
         )
+    if not spec.preconditions and spec.source == "fallback":
+        return HostVerdict(
+            host=runner.host_name,
+            cve_id=spec.cve_id,
+            status=VerdictStatus.UNDER_INVESTIGATION,
+            reason="Advisory did not yield any deterministic preconditions to probe",
+            justification=None,
+            probe_results=[],
+            mitigation=list(spec.mitigation),
+            patch=spec.patch,
+            os_family=host_os,
+        )
     if spec_os != host_os:
         return HostVerdict(
             host=runner.host_name,
@@ -79,12 +91,18 @@ def evaluate_host(spec: CheckSpec, runner: HostRunner) -> HostVerdict:
             first_unknown = res
 
     if first_not_met is not None:
+        just = first_not_met.precondition.justification_if_not_met
+        if first_not_met.precondition.probe == "package_installed_vulnerable":
+            if "is not installed" in first_not_met.evidence:
+                just = VexJustification.COMPONENT_NOT_PRESENT
+            elif ">= fixed version" in first_not_met.evidence:
+                just = VexJustification.VULNERABLE_CODE_NOT_PRESENT
         return HostVerdict(
             host=runner.host_name,
             cve_id=spec.cve_id,
             status=VerdictStatus.NOT_AFFECTED,
             reason=first_not_met.evidence,
-            justification=first_not_met.precondition.justification_if_not_met,
+            justification=just,
             probe_results=results,
             mitigation=[],
             patch=spec.patch,

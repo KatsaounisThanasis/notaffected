@@ -212,48 +212,117 @@ def extract_from_osv_payload(
     mitigation: list[str] = []
 
     text_lower = full_text.lower()
-    is_windows = any(
-        phrase in text_lower
-        for phrase in (
-            "windows server",
-            "microsoft windows",
-            "windows shell",
-            "windows tcp/ip",
-            "microsoft message queuing",
-            "active directory",
-            "windows 10",
-            "windows 11",
-            "hklm\\",
-            "hklm:\\",
-            "print spooler",
+    db_spec = osv_data.get("database_specific") or {}
+    mitre_aff = (
+        db_spec.get("mitre_affected")
+        if isinstance(db_spec, dict) and isinstance(db_spec.get("mitre_affected"), list)
+        else []
+    )
+    has_msrc_ref = any(
+        "msrc.microsoft.com" in str(r.get("url") or "").lower()
+        for r in (osv_data.get("references") or [])
+        if isinstance(r, dict)
+    )
+    has_mitre_windows = any(
+        "windows" in str(a.get("product") or "").lower()
+        for a in mitre_aff
+        if isinstance(a, dict)
+    )
+    is_windows = not pkg_name and (
+        has_mitre_windows
+        or has_msrc_ref
+        or text_lower.startswith("windows ")
+        or any(
+            phrase in text_lower
+            for phrase in (
+                "windows server",
+                "microsoft windows",
+                "windows shell",
+                "windows tcp/ip",
+                "windows remote desktop",
+                "windows hyper-v",
+                "microsoft message queuing",
+                "active directory",
+                "windows 10",
+                "windows 11",
+                "hklm\\",
+                "hklm:\\",
+                "print spooler",
+            )
         )
     )
     os_family = "windows" if is_windows else "linux"
 
     if is_windows:
         kb_match = re.search(r"\b(KB\d{6,8})\b", full_text, re.IGNORECASE)
-        if kb_match:
-            kb_id = kb_match.group(1).upper()
-            fixed_ver = fixed_ver or kb_id
-            ecosystem = ecosystem or "msrc"
+        kb_id = kb_match.group(1).upper() if kb_match else ""
+        fixed_build = ""
+        for a in mitre_aff:
+            if not isinstance(a, dict):
+                continue
+            prod = str(a.get("product") or "").lower()
+            for v in a.get("versions") or []:
+                if not isinstance(v, dict):
+                    continue
+                lt = str(v.get("lessThan") or "").strip()
+                m_build = re.match(r"^(?:10\.0\.)?(\d{5}\.\d+)$", lt)
+                if m_build:
+                    cand_build = m_build.group(1)
+                    if "2022" in prod and cand_build.startswith("20348."):
+                        fixed_build = cand_build
+                        break
+                    if not fixed_build:
+                        fixed_build = cand_build
+            if fixed_build.startswith("20348."):
+                break
+
+        if kb_id or fixed_build:
+            win_params: dict[str, Any] = {}
+            if kb_id:
+                win_params["kb"] = kb_id
+            if fixed_build:
+                win_params["fixed_build"] = fixed_build
+            fixed_ver = fixed_ver or (
+                f"{kb_id} ({fixed_build})" if kb_id and fixed_build else (kb_id or fixed_build)
+            )
+            ecosystem = ecosystem or "msrc-security-update"
+            desc_parts = []
+            if fixed_build:
+                desc_parts.append(f"OS build < {fixed_build}")
+            if kb_id:
+                desc_parts.append(f"update {kb_id} is not installed")
             preconditions.append(
                 Precondition(
                     probe="windows_build_vulnerable",
-                    params={"kb": kb_id},
-                    description=f"Windows security update {kb_id} is not installed",
+                    params=win_params,
+                    description="Windows " + " and ".join(desc_parts),
                     justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_PRESENT,
                 )
             )
-        if "spooler" in text_lower:
-            preconditions.append(
-                Precondition(
-                    probe="windows_service_active",
-                    params={"service": "Spooler"},
-                    description="Windows Print Spooler service ('Spooler') is Running",
-                    justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+
+        win_service_map = (
+            ("spooler", "Spooler", "Print Spooler"),
+            ("remote desktop licensing", "TermServLicensing", "Remote Desktop Licensing"),
+            ("message queuing", "MSMQ", "Message Queuing (MSMQ)"),
+            ("msmq", "MSMQ", "Message Queuing (MSMQ)"),
+            ("dns server", "DNS", "Windows DNS Server"),
+            ("dhcp server", "DHCPServer", "Windows DHCP Server"),
+            ("windows search", "WSearch", "Windows Search"),
+        )
+        for phrase, svc_name, svc_label in win_service_map:
+            if phrase in text_lower:
+                preconditions.append(
+                    Precondition(
+                        probe="windows_service_active",
+                        params={"service": svc_name},
+                        description=f"{svc_label} service ('{svc_name}') is Running",
+                        justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+                    )
                 )
-            )
-            mitigation.append("Stop-Service -Name Spooler -Force; Set-Service -Name Spooler -StartupType Disabled")
+                mitigation.append(
+                    f"Stop-Service -Name {svc_name} -Force; Set-Service -Name {svc_name} -StartupType Disabled"
+                )
+                break
 
     is_kernel = (
         not is_windows
@@ -400,6 +469,30 @@ def _precondition_dedup_key(pre: Precondition) -> tuple[str, str]:
     return (pre.probe, json.dumps(params, sort_keys=True))
 
 
+def _score_osv_affected_entry(eco: str, name: str, text_lower: str = "") -> int:
+    eco_low = eco.lower()
+    name_low = name.lower()
+    score = 10
+    if "ubuntu:24.04" in eco_low:
+        score = 100
+    elif "ubuntu:22.04" in eco_low:
+        score = 90
+    elif "ubuntu:20.04" in eco_low:
+        score = 80
+    elif "ubuntu" in eco_low:
+        score = 65
+    elif "debian" in eco_low:
+        score = 55
+
+    if name_low and text_lower and name_low in text_lower:
+        score += 25
+    if "pro:" in eco_low or "fips" in eco_low or name_low.endswith("-fips"):
+        score -= 45
+    if name_low.startswith("linux-") and name_low not in ("linux-image", "linux-base"):
+        score -= 35
+    return score
+
+
 def _extract_package_and_fix(
     osv_data: dict[str, Any],
     package_hint: str | None,
@@ -408,6 +501,10 @@ def _extract_package_and_fix(
     pkg_name = package_hint
     fixed_ver = fixed_version_hint
     ecosystem = None
+    best_score = -999
+    text_lower = (
+        f"{osv_data.get('summary') or ''} {osv_data.get('details') or ''}".lower()
+    )
 
     for aff in osv_data.get("affected") or []:
         if not isinstance(aff, dict):
@@ -415,18 +512,25 @@ def _extract_package_and_fix(
         pkg = aff.get("package") or {}
         eco = str(pkg.get("ecosystem") or "")
         name = str(pkg.get("name") or "")
-        is_preferred_distro = "ubuntu" in eco.lower() or "debian" in eco.lower()
-        if not pkg_name and name:
-            pkg_name = name
-            ecosystem = eco
-        if is_preferred_distro:
-            pkg_name = name or pkg_name
-            ecosystem = eco
+        cand_fixed = None
         for rng in aff.get("ranges") or []:
             for ev in rng.get("events") or []:
                 if isinstance(ev, dict) and ev.get("fixed"):
-                    if not fixed_ver or (is_preferred_distro and not fixed_version_hint):
-                        fixed_ver = str(ev["fixed"])
+                    cand_fixed = str(ev["fixed"])
+                    break
+            if cand_fixed:
+                break
+
+        score = _score_osv_affected_entry(eco, name, text_lower)
+        if cand_fixed:
+            score += 5
+        if score > best_score:
+            best_score = score
+            if not package_hint and name:
+                pkg_name = name
+            ecosystem = eco or ecosystem
+            if not fixed_version_hint and cand_fixed:
+                fixed_ver = cand_fixed
     return pkg_name, fixed_ver, ecosystem
 
 

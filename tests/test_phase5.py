@@ -318,4 +318,65 @@ def test_reset_lab_and_custom_target_runner() -> None:
     assert all(r.host_name != "-oProxyCommand=evil" for r in r_unsafe)
 
 
+def test_osv_scoring_mitre_windows_and_fallback_verdict() -> None:
+    from notaffected.advisories.extractor import extract_from_osv_payload, resolve_check_spec
+    from notaffected.engine.evaluator import evaluate_host
+    from notaffected.model import VerdictStatus
+
+    # 1. Standard Ubuntu 24.04 package named in summary beats edk2 and FIPS derivatives
+    osv_sample = {
+        "id": "CVE-2024-2511",
+        "summary": "OpenSSL TLS server session cache growth vulnerability",
+        "details": "Issue in OpenSSL TLSv1.3 session handling.",
+        "affected": [
+            {
+                "package": {"ecosystem": "Ubuntu:24.04:LTS", "name": "edk2"},
+                "ranges": [{"events": [{"fixed": "2024.02-2ubuntu0.6"}]}],
+            },
+            {
+                "package": {"ecosystem": "Ubuntu:24.04:LTS", "name": "openssl"},
+                "ranges": [{"events": [{"fixed": "3.0.13-0ubuntu3.2"}]}],
+            },
+            {
+                "package": {"ecosystem": "Ubuntu:Pro:FIPS-updates:24.04:LTS", "name": "openssl-fips"},
+                "ranges": [{"events": [{"fixed": "3.0.13-0ubuntu3.6+Fips1"}]}],
+            },
+        ],
+    }
+    spec_openssl = extract_from_osv_payload("CVE-2024-2511", osv_sample)
+    assert spec_openssl.preconditions[0].params["package"] == "openssl"
+    assert spec_openssl.preconditions[0].params["fixed_version"] == "3.0.13-0ubuntu3.2"
+
+    # 2. MITRE Windows CVE extracts fixed_build (20348.x) and windows_service_active
+    mitre_win = {
+        "id": "CVE-2024-38077",
+        "summary": "Windows Remote Desktop Licensing Service Remote Code Execution Vulnerability",
+        "details": "Windows Remote Desktop Licensing Service Remote Code Execution Vulnerability",
+        "affected": [],
+        "references": [{"type": "ADVISORY", "url": "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2024-38077"}],
+        "database_specific": {
+            "severity": "CRITICAL",
+            "mitre_affected": [
+                {
+                    "vendor": "Microsoft",
+                    "product": "Windows Server 2022",
+                    "versions": [{"version": "10.0.20348.0", "lessThan": "10.0.20348.2582", "status": "affected"}],
+                }
+            ],
+        },
+    }
+    spec_win = extract_from_osv_payload("CVE-2024-38077", mitre_win)
+    assert spec_win.os_family == "windows"
+    assert spec_win.confidence == "high"
+    assert any(p.probe == "windows_build_vulnerable" and p.params.get("fixed_build") == "20348.2582" for p in spec_win.preconditions)
+    assert any(p.probe == "windows_service_active" and p.params.get("service") == "TermServLicensing" for p in spec_win.preconditions)
+
+    # 3. Unknown fallback CVE with 0 preconditions yields UNDER_INVESTIGATION on Windows too
+    spec_unknown = resolve_check_spec("CVE-9999-99999", use_llm=False)
+    win_host = MockRunner(host_name="win-dc-01", responses={}, os_family="windows")
+    verdict_unk = evaluate_host(spec_unknown, win_host)
+    assert verdict_unk.status == VerdictStatus.UNDER_INVESTIGATION
+
+
+
 

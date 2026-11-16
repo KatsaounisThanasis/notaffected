@@ -81,7 +81,11 @@ def fetch_mitre_cve_as_osv(
 
     if cache_file.is_file():
         try:
-            return json.loads(cache_file.read_text(encoding="utf-8"))
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            if isinstance(cached, dict) and "mitre_affected" in (
+                cached.get("database_specific") or {}
+            ):
+                return cached
         except Exception:
             pass
 
@@ -114,13 +118,19 @@ def fetch_mitre_cve_as_osv(
             for r in (cna.get("references") or [])
             if isinstance(r, dict) and r.get("url")
         ]
+        mitre_affected = [
+            a for a in (cna.get("affected") or []) if isinstance(a, dict)
+        ]
         normalized: dict[str, Any] = {
             "id": norm_id,
             "summary": title or eng_desc[:160] or norm_id,
             "details": eng_desc or title,
             "affected": [],
             "references": refs,
-            "database_specific": {"severity": severity},
+            "database_specific": {
+                "severity": severity,
+                "mitre_affected": mitre_affected,
+            },
         }
         try:
             cdir.mkdir(parents=True, exist_ok=True)

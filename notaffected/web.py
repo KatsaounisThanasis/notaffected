@@ -150,7 +150,12 @@ def reset_lab_and_demo() -> dict[str, Any]:
     if "lab-ssh-vuln" in containers:
         r_ssh = DockerRunner(container="lab-ssh-vuln", host_name="lab-ssh-vuln", os_family="linux")
         res = r_ssh.run(
-            ["sh", "-c", "printf 'Port 22\\nPermitRootLogin no\\nLoginGraceTime 120\\n' > /etc/ssh/sshd_config"]
+            [
+                "sh",
+                "-c",
+                "printf 'Port 22\\nPermitRootLogin no\\nLoginGraceTime 120\\n' > /etc/ssh/sshd_config "
+                "&& echo '1:9.6p1-3ubuntu13' > /etc/ssh/openssh_version",
+            ]
         )
         if res.returncode == 0 and not res.transport_error:
             reset_targets.append("lab-ssh-vuln")

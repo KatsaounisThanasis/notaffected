@@ -13,6 +13,7 @@ docker run -d --name lab-ssh-vuln --label notaffected.lab=true --label notaffect
 docker exec lab-ssh-vuln sh -c '
   mkdir -p /etc/ssh /usr/local/bin
   printf "Port 22\nPermitRootLogin no\nLoginGraceTime 120\n" > /etc/ssh/sshd_config
+  echo "1:9.6p1-3ubuntu13" > /etc/ssh/openssh_version
 
   cat << "EOF" > /usr/local/bin/uname
 #!/bin/sh
@@ -24,14 +25,18 @@ EOF
 #!/bin/sh
 pkg=""
 for arg in "$@"; do pkg="$arg"; done
+ssh_ver="1:9.6p1-3ubuntu13"
+if [ -f /etc/ssh/openssh_version ]; then
+  ssh_ver="$(cat /etc/ssh/openssh_version)"
+fi
 if [ "$pkg" = "openssh-server" ]; then
-  printf "ii \t1:9.6p1-3ubuntu13\n"
+  printf "ii \t%s\n" "$ssh_ver"
   exit 0
 fi
 case "$pkg" in
   -f=*source:Package*)
     printf "ii \tlibc6\tglibc\t2.39-0ubuntu8.3\t2.39-0ubuntu8.3\n"
-    printf "ii \topenssh-server\topenssh\t1:9.6p1-3ubuntu13\t1:9.6p1-3ubuntu13\n"
+    printf "ii \topenssh-server\topenssh\t%s\t%s\n" "$ssh_ver" "$ssh_ver"
     exit 0
     ;;
 esac
@@ -39,6 +44,19 @@ echo "dpkg-query: no packages found matching $pkg" >&2
 exit 1
 EOF
   chmod +x /usr/local/bin/dpkg-query
+
+  cat << "EOF" > /usr/local/bin/apt
+#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "openssh-server" ]; then
+    echo "1:9.6p1-3ubuntu13.3" > /etc/ssh/openssh_version
+    echo "Upgraded openssh-server to 1:9.6p1-3ubuntu13.3"
+    exit 0
+  fi
+done
+exit 0
+EOF
+  chmod +x /usr/local/bin/apt
 
   cat << "EOF" > /usr/local/bin/dpkg
 #!/bin/sh
@@ -175,6 +193,10 @@ case \"\$cmd\" in
     ;;
   *\"Get-Service\"*\"Spooler\"*)
     cat /etc/win-sim/Spooler
+    exit 0
+    ;;
+  *\"Get-Service\"*)
+    echo \"Stopped\"
     exit 0
     ;;
 esac
