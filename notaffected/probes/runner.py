@@ -339,15 +339,29 @@ class MockRunner:
         host_name: str,
         responses: dict[tuple[str, ...], CommandResult],
         os_family: str = "linux",
+        simulate_dpkg_db: bool = False,
     ) -> None:
         self.host_name = host_name
         self.responses = dict(responses)
         self.os_family = os_family.lower()
+        self.simulate_dpkg_db = simulate_dpkg_db
 
     def run(self, argv: list[str]) -> CommandResult:
         key = tuple(argv)
         if key in self.responses:
             return self.responses[key]
+        if (
+            self.simulate_dpkg_db
+            and len(argv) == 4
+            and argv[0] == "dpkg-query"
+            and argv[1] == "-W"
+        ):
+            return CommandResult(
+                returncode=1,
+                stdout="",
+                stderr=f"dpkg-query: no packages found matching {argv[3]}\n",
+                transport_error=False,
+            )
         return CommandResult(
             returncode=127,
             stdout="",

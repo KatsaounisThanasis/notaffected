@@ -23,14 +23,26 @@ def load_demo_fleet() -> list[HostRunner]:
     """Return a realistic 3-host simulated fleet (laptop, exposed server, patched DB)
     so users can test multi-host verdicts without configuring SSH targets.
     """
+    dpkg_src_cmd = (
+        "dpkg-query",
+        "-W",
+        "-f=${db:Status-Abbrev}\\t${binary:Package}\\t${source:Package}\\t${Version}\\t${source:Version}\\n",
+    )
     laptop = MockRunner(
         host_name="dev-laptop-01",
+        simulate_dpkg_db=True,
         responses={
             ("uname", "-r"): CommandResult(0, "6.8.0-40-generic\n", ""),
             ("dpkg", "--compare-versions", "6.8.0-40", "lt", "4.4.0"): CommandResult(1, "", ""),
             ("dpkg", "--compare-versions", "6.8.0-40", "lt", "6.8.0-45"): CommandResult(0, "", ""),
             ("dpkg", "--compare-versions", "6.8.0-40", "lt", "6.2.0-21"): CommandResult(1, "", ""),
             ("cat", "/proc/modules"): CommandResult(0, "tls 163840 0 - Live 0x0\n", ""),
+            dpkg_src_cmd: CommandResult(
+                0,
+                "ii \tlibc6\tglibc\t2.39-0ubuntu8.3\t2.39-0ubuntu8.3\n"
+                "ii \tcups-browsed\tcups-filters\t2.0.0-0ubuntu10.1\t2.0.0-0ubuntu10.1\n",
+                "",
+            ),
             ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "cups-browsed"): CommandResult(
                 0, "ii \t2.0.0-0ubuntu10.1\n", ""
             ),
@@ -58,12 +70,19 @@ def load_demo_fleet() -> list[HostRunner]:
     )
     edge_server = MockRunner(
         host_name="prod-edge-api-01",
+        simulate_dpkg_db=True,
         responses={
             ("uname", "-r"): CommandResult(0, "6.8.0-40-generic\n", ""),
             ("dpkg", "--compare-versions", "6.8.0-40", "lt", "4.4.0"): CommandResult(1, "", ""),
             ("dpkg", "--compare-versions", "6.8.0-40", "lt", "6.8.0-45"): CommandResult(0, "", ""),
             ("dpkg", "--compare-versions", "6.8.0-40", "lt", "6.2.0-21"): CommandResult(1, "", ""),
             ("cat", "/proc/modules"): CommandResult(0, "tls 163840 0 - Live 0x0\n", ""),
+            dpkg_src_cmd: CommandResult(
+                0,
+                "ii \tlibc6\tglibc\t2.39-0ubuntu8.3\t2.39-0ubuntu8.3\n"
+                "ii \topenssh-server\topenssh\t1:9.6p1-3ubuntu13\t1:9.6p1-3ubuntu13\n",
+                "",
+            ),
             ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "cups-browsed"): CommandResult(
                 1, "", "dpkg-query: no packages found matching cups-browsed\n"
             ),
@@ -100,12 +119,19 @@ def load_demo_fleet() -> list[HostRunner]:
     )
     patched_db = MockRunner(
         host_name="prod-db-01",
+        simulate_dpkg_db=True,
         responses={
             ("uname", "-r"): CommandResult(0, "6.8.0-45-generic\n", ""),
             ("dpkg", "--compare-versions", "6.8.0-45", "lt", "4.4.0"): CommandResult(1, "", ""),
             ("dpkg", "--compare-versions", "6.8.0-45", "lt", "6.8.0-45"): CommandResult(1, "", ""),
             ("dpkg", "--compare-versions", "6.8.0-45", "lt", "6.2.0-21"): CommandResult(1, "", ""),
             ("cat", "/proc/modules"): CommandResult(0, "tls 163840 0 - Live 0x0\n", ""),
+            dpkg_src_cmd: CommandResult(
+                0,
+                "ii \tlibc6\tglibc\t2.39-0ubuntu8.3\t2.39-0ubuntu8.3\n"
+                "ii \topenssh-server\topenssh\t1:9.6p1-3ubuntu13.4\t1:9.6p1-3ubuntu13.4\n",
+                "",
+            ),
             ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "cups-browsed"): CommandResult(
                 1, "", "dpkg-query: no packages found matching cups-browsed\n"
             ),

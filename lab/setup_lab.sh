@@ -28,6 +28,13 @@ if [ "$pkg" = "openssh-server" ]; then
   printf "ii \t1:9.6p1-3ubuntu13\n"
   exit 0
 fi
+case "$pkg" in
+  -f=*source:Package*)
+    printf "ii \tlibc6\tglibc\t2.39-0ubuntu8.3\t2.39-0ubuntu8.3\n"
+    printf "ii \topenssh-server\topenssh\t1:9.6p1-3ubuntu13\t1:9.6p1-3ubuntu13\n"
+    exit 0
+    ;;
+esac
 echo "dpkg-query: no packages found matching $pkg" >&2
 exit 1
 EOF
@@ -91,6 +98,13 @@ if [ "$pkg" = "openssh-server" ]; then
   printf "ii \t1:9.6p1-3ubuntu13\n"
   exit 0
 fi
+case "$pkg" in
+  -f=*source:Package*)
+    printf "ii \tlibc6\tglibc\t2.39-0ubuntu8.3\t2.39-0ubuntu8.3\n"
+    printf "ii \topenssh-server\topenssh\t1:9.6p1-3ubuntu13\t1:9.6p1-3ubuntu13\n"
+    exit 0
+    ;;
+esac
 echo "dpkg-query: no packages found matching $pkg" >&2
 exit 1
 EOF

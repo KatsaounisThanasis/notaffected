@@ -165,26 +165,54 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
             command=cmd_str,
         )
 
+    pkg_display = pkg
     if res.returncode != 0:
         stderr_lower = res.stderr.lower()
         if "no packages found" in stderr_lower or (res.returncode == 1 and not stderr_lower.strip()):
+            src_res = runner.run(
+                [
+                    "dpkg-query",
+                    "-W",
+                    "-f=${db:Status-Abbrev}\\t${binary:Package}\\t${source:Package}\\t${Version}\\t${source:Version}\\n",
+                ]
+            )
+            matched_bin = ""
+            matched_ver = ""
+            if not src_res.transport_error and src_res.returncode == 0 and src_res.stdout:
+                for sline in src_res.stdout.splitlines():
+                    sparts = sline.split("\t")
+                    if len(sparts) >= 4 and sparts[0].strip().startswith("ii"):
+                        bin_name = sparts[1].strip()
+                        src_name = sparts[2].strip()
+                        bin_ver = sparts[3].strip()
+                        src_ver = sparts[4].strip() if len(sparts) > 4 else ""
+                        if src_name == pkg:
+                            matched_bin = bin_name
+                            matched_ver = src_ver or bin_ver
+                            break
+            if matched_bin and matched_ver:
+                status_abbrev = "ii"
+                installed_ver = matched_ver
+                pkg_display = f"{pkg} (binary: {matched_bin})"
+            else:
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.NOT_MET,
+                    evidence=f"Package '{pkg}' is not installed (dpkg-query)",
+                    command=cmd_str,
+                )
+        else:
             return ProbeResult(
                 precondition=pre,
-                status=ProbeStatus.NOT_MET,
-                evidence=f"Package '{pkg}' is not installed (dpkg-query)",
+                status=ProbeStatus.UNKNOWN,
+                evidence=f"Could not query package '{pkg}': {res.stderr.strip()}",
                 command=cmd_str,
             )
-        return ProbeResult(
-            precondition=pre,
-            status=ProbeStatus.UNKNOWN,
-            evidence=f"Could not query package '{pkg}': {res.stderr.strip()}",
-            command=cmd_str,
-        )
-
-    line = res.stdout.strip().splitlines()[0] if res.stdout.strip() else ""
-    parts = line.split("\t")
-    status_abbrev = parts[0].strip() if parts else ""
-    installed_ver = parts[1].strip() if len(parts) > 1 else ""
+    else:
+        line = res.stdout.strip().splitlines()[0] if res.stdout.strip() else ""
+        parts = line.split("\t")
+        status_abbrev = parts[0].strip() if parts else ""
+        installed_ver = parts[1].strip() if len(parts) > 1 else ""
 
     if not status_abbrev.startswith("ii"):
         return ProbeResult(
@@ -198,7 +226,7 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.MET,
-            evidence=f"Package '{pkg}' is installed at version '{installed_ver}' (no fixed version specified)",
+            evidence=f"Package '{pkg_display}' is installed at version '{installed_ver}' (no fixed version specified)",
             command=cmd_str,
         )
 
@@ -207,7 +235,7 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.UNKNOWN,
-            evidence=f"Transport error comparing versions for '{pkg}': {cmp_res.stderr.strip()}",
+            evidence=f"Transport error comparing versions for '{pkg_display}': {cmp_res.stderr.strip()}",
             command=cmd_str,
         )
     if cmp_res.returncode == 127:
@@ -218,20 +246,20 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.UNKNOWN,
-            evidence=f"Invalid version comparison for '{pkg}' ('{installed_ver}' vs '{fixed_version}'): {cmp_res.stderr.strip()}",
+            evidence=f"Invalid version comparison for '{pkg_display}' ('{installed_ver}' vs '{fixed_version}'): {cmp_res.stderr.strip()}",
             command=cmd_str,
         )
     if is_vuln:
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.MET,
-            evidence=f"Package '{pkg}' installed version '{installed_ver}' is < fixed version '{fixed_version}'",
+            evidence=f"Package '{pkg_display}' installed version '{installed_ver}' is < fixed version '{fixed_version}'",
             command=cmd_str,
         )
     return ProbeResult(
         precondition=pre,
         status=ProbeStatus.NOT_MET,
-        evidence=f"Package '{pkg}' installed version '{installed_ver}' is >= fixed version '{fixed_version}'",
+        evidence=f"Package '{pkg_display}' installed version '{installed_ver}' is >= fixed version '{fixed_version}'",
         command=cmd_str,
     )
 

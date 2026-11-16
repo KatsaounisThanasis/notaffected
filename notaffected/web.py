@@ -709,6 +709,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="val ok" id="kpiNotAffected">0</div>
       </div>
       <div class="kpi-card">
+        <div class="label">Under Investigation</div>
+        <div class="val" id="kpiUnderInv" style="color:var(--warn);">0</div>
+      </div>
+      <div class="kpi-card">
         <div class="label">False-Positive Noise Cut</div>
         <div class="val accent" id="kpiNoise">0%</div>
       </div>
@@ -909,6 +913,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById("kpiTotal").textContent = s.total || 0;
         document.getElementById("kpiAffected").textContent = s.affected || 0;
         document.getElementById("kpiNotAffected").textContent = s.not_affected || 0;
+        document.getElementById("kpiUnderInv").textContent = s.under_investigation || 0;
         document.getElementById("kpiNoise").textContent = (s.noise_reduction_pct || 0) + "%";
         document.getElementById("briefingBox").textContent = latestResult.briefing || "";
 

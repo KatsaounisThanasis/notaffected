@@ -583,6 +583,36 @@ def test_windows_probes_build_registry_and_service():
     assert run_probe(p_win_proc, win_proc_runner).status == ProbeStatus.MET
 
 
+def test_package_installed_source_package_fallback() -> None:
+    dpkg_src_cmd = (
+        "dpkg-query",
+        "-W",
+        "-f=${db:Status-Abbrev}\\t${binary:Package}\\t${source:Package}\\t${Version}\\t${source:Version}\\n",
+    )
+    runner = MockRunner(
+        host_name="ubuntu-node",
+        simulate_dpkg_db=True,
+        responses={
+            dpkg_src_cmd: CommandResult(
+                0,
+                "ii \tlibc6\tglibc\t2.39-0ubuntu8.12\t2.39-0ubuntu8.12\n",
+                "",
+            ),
+            ("dpkg", "--compare-versions", "2.39-0ubuntu8.12", "lt", "2.38-1ubuntu6"): CommandResult(1, "", ""),
+        },
+    )
+    pre = Precondition(
+        "package_installed_vulnerable",
+        {"package": "glibc", "fixed_version": "2.38-1ubuntu6"},
+        "glibc vulnerable",
+    )
+    res = run_probe(pre, runner)
+    assert res.status == ProbeStatus.NOT_MET
+    assert "glibc (binary: libc6)" in res.evidence
+    assert "2.39-0ubuntu8.12" in res.evidence
+
+
+
 
 
 
