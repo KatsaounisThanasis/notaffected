@@ -145,6 +145,12 @@ def _probe_installed_watched_packages(runner: HostRunner) -> dict[str, str]:
     return installed
 
 
+_BINARY_TO_OSV_SOURCE: dict[str, str] = {
+    "openssh-server": "openssh",
+    "libc6": "glibc",
+}
+
+
 def discover_host_package_cves(
     runners: list[HostRunner],
     timeout: int = 8,
@@ -169,9 +175,13 @@ def discover_host_package_cves(
     queries: list[dict[str, Any]] = []
     query_pkg_map: list[str] = []
     for pkg, ver in pkg_versions:
-        for eco in ("Ubuntu", "Debian"):
-            queries.append({"package": {"name": pkg, "ecosystem": eco}, "version": ver})
-            query_pkg_map.append(pkg)
+        osv_names = [pkg]
+        if pkg in _BINARY_TO_OSV_SOURCE:
+            osv_names.append(_BINARY_TO_OSV_SOURCE[pkg])
+        for qname in osv_names:
+            for eco in ("Ubuntu", "Debian"):
+                queries.append({"package": {"name": qname, "ecosystem": eco}, "version": ver})
+                query_pkg_map.append(pkg)
 
     try:
         req = urllib.request.Request(

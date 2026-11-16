@@ -129,6 +129,12 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         severity="CRITICAL",
         preconditions=[
             Precondition(
+                probe="kernel_version_vulnerable",
+                params={"fixed_version": "5.19.0-28"},
+                description="Running Linux kernel is < 5.19.0-28",
+                justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_PRESENT,
+            ),
+            Precondition(
                 probe="kernel_module_loaded",
                 params={"module": "ksmbd"},
                 description="In-kernel SMB server module 'ksmbd' is loaded in /proc/modules",

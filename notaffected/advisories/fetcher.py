@@ -14,12 +14,14 @@ from typing import Any
 
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "notaffected" / "osv"
 _SAFE_ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{2,63}$")
+_OSV_MISS_CACHE: set[str] = set()
 
 
 def fetch_osv_advisory(
     cve_id: str,
     cache_dir: Path | None = None,
     timeout: int = 8,
+    offline: bool = False,
 ) -> dict[str, Any] | None:
     """Fetch OSV JSON record for `cve_id` from cache or `https://api.osv.dev/v1/vulns/<id>`."""
     norm_id = cve_id.strip().upper()
@@ -34,6 +36,9 @@ def fetch_osv_advisory(
         except Exception:
             pass
 
+    if offline or (cache_dir is None and norm_id in _OSV_MISS_CACHE):
+        return None
+
     url = f"https://api.osv.dev/v1/vulns/{norm_id}"
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -46,6 +51,10 @@ def fetch_osv_advisory(
             except OSError:
                 pass
             return data
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404 and cache_dir is None:
+            _OSV_MISS_CACHE.add(norm_id)
+        return None
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return None
     return None
@@ -55,6 +64,7 @@ def fetch_ubuntu_osv_advisory(
     cve_id: str,
     cache_dir: Path | None = None,
     timeout: int = 8,
+    offline: bool = False,
 ) -> dict[str, Any] | None:
     """Fetch Ubuntu-specific OSV record (`UBUNTU-CVE-...`) for `cve_id`."""
     norm_id = cve_id.strip().upper()
@@ -64,13 +74,14 @@ def fetch_ubuntu_osv_advisory(
         ubuntu_id = norm_id
     else:
         return None
-    return fetch_osv_advisory(ubuntu_id, cache_dir=cache_dir, timeout=timeout)
+    return fetch_osv_advisory(ubuntu_id, cache_dir=cache_dir, timeout=timeout, offline=offline)
 
 
 def fetch_mitre_cve_as_osv(
     cve_id: str,
     cache_dir: Path | None = None,
     timeout: int = 8,
+    offline: bool = False,
 ) -> dict[str, Any] | None:
     """Fetch official MITRE CVE v5 record (`cveawg.mitre.org`) and normalize to OSV shape."""
     norm_id = cve_id.strip().upper()
@@ -82,12 +93,16 @@ def fetch_mitre_cve_as_osv(
     if cache_file.is_file():
         try:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            if isinstance(cached, dict) and "mitre_affected" in (
-                cached.get("database_specific") or {}
+            if isinstance(cached, dict) and (
+                offline
+                or "mitre_affected" in (cached.get("database_specific") or {})
             ):
                 return cached
         except Exception:
             pass
+
+    if offline:
+        return None
 
     url = f"https://cveawg.mitre.org/api/cve/{norm_id}"
     try:

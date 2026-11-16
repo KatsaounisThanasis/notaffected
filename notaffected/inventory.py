@@ -179,6 +179,7 @@ def load_demo_fleet() -> list[HostRunner]:
     win_dc = MockRunner(
         host_name="win-dc-01",
         os_family="windows",
+        simulate_dpkg_db=True,
         responses={
             ps_kb_cmd: CommandResult(0, "BUILD=20348.2402|KBS=KB5039217\n", ""),
             ps_reg_ipv6: CommandResult(0, "0\n", ""),
@@ -188,6 +189,7 @@ def load_demo_fleet() -> list[HostRunner]:
     win_filesrv = MockRunner(
         host_name="win-filesrv-02",
         os_family="windows",
+        simulate_dpkg_db=True,
         responses={
             ps_kb_cmd: CommandResult(0, "BUILD=20348.2402|KBS=KB5039217\n", ""),
             ps_reg_ipv6: CommandResult(0, "255\n", ""),

@@ -38,6 +38,24 @@ def resolve_host_patch_info(spec: CheckSpec, runner: HostRunner) -> PatchInfo:
 
     res = runner.run(["apt-cache", "policy", target_pkg])
     if res.transport_error or res.returncode != 0 or not res.stdout.strip():
+        src_res = runner.run(
+            [
+                "dpkg-query",
+                "-W",
+                "-f=${db:Status-Abbrev}\\t${binary:Package}\\t${source:Package}\\t${Version}\\t${source:Version}\\n",
+            ]
+        )
+        if not src_res.transport_error and src_res.returncode == 0 and src_res.stdout:
+            for sline in src_res.stdout.splitlines():
+                sparts = sline.split("\t")
+                if len(sparts) >= 3 and sparts[0].strip().startswith("ii"):
+                    bin_name = sparts[1].strip().split(":")[0]
+                    src_name = sparts[2].strip().split(" ")[0]
+                    if src_name == target_pkg:
+                        res = runner.run(["apt-cache", "policy", bin_name])
+                        if not res.transport_error and res.returncode == 0 and res.stdout.strip():
+                            break
+    if res.transport_error or res.returncode != 0 or not res.stdout.strip():
         return base_patch
 
     candidate_ver: str | None = None

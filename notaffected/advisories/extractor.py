@@ -122,14 +122,15 @@ def resolve_check_spec(
     cache_dir: Path | None = None,
     package_hint: str | None = None,
     fixed_version_hint: str | None = None,
+    offline: bool = False,
 ) -> CheckSpec:
     """Resolve a CheckSpec for `cve_id`: built-in golden spec first, then OSV + Ubuntu OSV + heuristics/LLM."""
     norm_id = cve_id.strip().upper()
     if norm_id in BUILTIN_SPECS:
         return BUILTIN_SPECS[norm_id]
 
-    osv_data = fetch_osv_advisory(norm_id, cache_dir=cache_dir)
-    ubuntu_osv = fetch_ubuntu_osv_advisory(norm_id, cache_dir=cache_dir)
+    osv_data = None if offline else fetch_osv_advisory(norm_id, cache_dir=cache_dir)
+    ubuntu_osv = None if offline else fetch_ubuntu_osv_advisory(norm_id, cache_dir=cache_dir)
     if osv_data and ubuntu_osv:
         merged = dict(osv_data)
         merged["affected"] = list(osv_data.get("affected") or []) + list(
@@ -142,8 +143,21 @@ def resolve_check_spec(
     elif ubuntu_osv and not osv_data:
         osv_data = ubuntu_osv
 
-    if not osv_data:
+    if not osv_data and not offline:
         osv_data = fetch_mitre_cve_as_osv(norm_id, cache_dir=cache_dir)
+    elif osv_data and not offline:
+        summ_low = f"{osv_data.get('summary') or ''} {osv_data.get('details') or ''}".lower()
+        if "windows " in summ_low or "netlogon" in summ_low or "active directory" in summ_low:
+            mitre_extra = fetch_mitre_cve_as_osv(norm_id, cache_dir=cache_dir)
+            if isinstance(mitre_extra, dict):
+                db_s = dict(osv_data.get("database_specific") or {})
+                m_aff = (mitre_extra.get("database_specific") or {}).get("mitre_affected")
+                if m_aff:
+                    db_s["mitre_affected"] = m_aff
+                    osv_data = dict(osv_data)
+                    osv_data["database_specific"] = db_s
+                if not osv_data.get("summary") and mitre_extra.get("summary"):
+                    osv_data["summary"] = mitre_extra["summary"]
 
     if osv_data:
         return extract_from_osv_payload(
@@ -228,28 +242,37 @@ def extract_from_osv_payload(
         for a in mitre_aff
         if isinstance(a, dict)
     )
-    is_windows = not pkg_name and (
-        has_mitre_windows
-        or has_msrc_ref
-        or text_lower.startswith("windows ")
-        or any(
-            phrase in text_lower
-            for phrase in (
-                "windows server",
-                "microsoft windows",
-                "windows shell",
-                "windows tcp/ip",
-                "windows remote desktop",
-                "windows hyper-v",
-                "microsoft message queuing",
-                "active directory",
-                "windows 10",
-                "windows 11",
-                "hklm\\",
-                "hklm:\\",
-                "print spooler",
-            )
+    has_windows_phrase = text_lower.startswith("windows ") or any(
+        phrase in text_lower
+        for phrase in (
+            "windows server",
+            "microsoft windows",
+            "windows shell",
+            "windows tcp/ip",
+            "windows remote desktop",
+            "windows hyper-v",
+            "windows kerberos",
+            "windows ntlm",
+            "windows common log",
+            "windows kernel",
+            "windows wi-fi",
+            "windows imaging",
+            "windows mshtml",
+            "windows dns",
+            "windows dhcp",
+            "microsoft message queuing",
+            "active directory",
+            "windows 10",
+            "windows 11",
+            "hklm\\",
+            "hklm:\\",
+            "print spooler",
         )
+    )
+    is_windows = (
+        (has_mitre_windows and (not pkg_name or text_lower.startswith("windows ")))
+        or (not pkg_name and has_windows_phrase)
+        or (not pkg_name and has_msrc_ref and "windows" in text_lower)
     )
     os_family = "windows" if is_windows else "linux"
 
@@ -257,6 +280,7 @@ def extract_from_osv_payload(
         kb_match = re.search(r"\b(KB\d{6,8})\b", full_text, re.IGNORECASE)
         kb_id = kb_match.group(1).upper() if kb_match else ""
         fixed_build = ""
+        branch_builds: list[str] = []
         for a in mitre_aff:
             if not isinstance(a, dict):
                 continue
@@ -264,24 +288,27 @@ def extract_from_osv_payload(
             for v in a.get("versions") or []:
                 if not isinstance(v, dict):
                     continue
-                lt = str(v.get("lessThan") or "").strip()
-                m_build = re.match(r"^(?:10\.0\.)?(\d{5}\.\d+)$", lt)
+                lt = str(v.get("lessThan") or v.get("lessThanOrEqual") or "").strip()
+                m_build = re.match(r"^(?:10\.0\.|6\.\d\.)?(\d{4,5}\.\d+)$", lt)
                 if m_build:
                     cand_build = m_build.group(1)
+                    if cand_build not in branch_builds:
+                        branch_builds.append(cand_build)
                     if "2022" in prod and cand_build.startswith("20348."):
                         fixed_build = cand_build
-                        break
-                    if not fixed_build:
+                    elif not fixed_build and cand_build.startswith("20348."):
                         fixed_build = cand_build
-            if fixed_build.startswith("20348."):
-                break
+        if not fixed_build and branch_builds:
+            fixed_build = branch_builds[0]
 
         if kb_id or fixed_build:
             win_params: dict[str, Any] = {}
             if kb_id:
                 win_params["kb"] = kb_id
             if fixed_build:
-                win_params["fixed_build"] = fixed_build
+                win_params["fixed_build"] = (
+                    ",".join(branch_builds) if len(branch_builds) > 1 else fixed_build
+                )
             fixed_ver = fixed_ver or (
                 f"{kb_id} ({fixed_build})" if kb_id and fixed_build else (kb_id or fixed_build)
             )
@@ -308,6 +335,10 @@ def extract_from_osv_payload(
             ("dns server", "DNS", "Windows DNS Server"),
             ("dhcp server", "DHCPServer", "Windows DHCP Server"),
             ("windows search", "WSearch", "Windows Search"),
+            ("wi-fi", "WlanSvc", "WLAN AutoConfig"),
+            ("wlan", "WlanSvc", "WLAN AutoConfig"),
+            ("http protocol stack", "W3SVC", "IIS World Wide Web Publishing"),
+            ("windows kerberos", "Kdc", "Kerberos Key Distribution Center"),
         )
         for phrase, svc_name, svc_label in win_service_map:
             if phrase in text_lower:
@@ -420,7 +451,9 @@ def extract_from_osv_payload(
         if llm_pres:
             source = "osv+llm"
 
-    # High confidence requires at least one narrowing runtime precondition beyond bare version check
+    # High confidence requires at least one narrowing runtime precondition beyond bare version check,
+    # and on Windows also requires a build/KB baseline precondition so a service check alone never
+    # falsely marks a patched Windows Server as AFFECTED.
     has_runtime_precondition = any(
         p.probe
         in (
@@ -436,7 +469,11 @@ def extract_from_osv_payload(
         )
         for p in preconditions
     )
-    confidence = "high" if has_runtime_precondition else "low"
+    has_win_baseline = (
+        os_family != "windows"
+        or any(p.probe == "windows_build_vulnerable" for p in preconditions)
+    )
+    confidence = "high" if (has_runtime_precondition and has_win_baseline) else "low"
 
     advisory_url = None
     for ref in osv_data.get("references") or []:
@@ -469,7 +506,11 @@ def _precondition_dedup_key(pre: Precondition) -> tuple[str, str]:
     return (pre.probe, json.dumps(params, sort_keys=True))
 
 
-def _score_osv_affected_entry(eco: str, name: str, text_lower: str = "") -> int:
+def _score_osv_affected_entry(
+    eco: str, name: str, text_lower: str = "", has_fixed: bool = False
+) -> int:
+    if not eco and not name:
+        return -500
     eco_low = eco.lower()
     name_low = name.lower()
     score = 10
@@ -484,6 +525,8 @@ def _score_osv_affected_entry(eco: str, name: str, text_lower: str = "") -> int:
     elif "debian" in eco_low:
         score = 55
 
+    if has_fixed:
+        score += 20
     if name_low and text_lower and name_low in text_lower:
         score += 25
     if "pro:" in eco_low or "fips" in eco_low or name_low.endswith("-fips"):
@@ -491,6 +534,9 @@ def _score_osv_affected_entry(eco: str, name: str, text_lower: str = "") -> int:
     if name_low.startswith("linux-") and name_low not in ("linux-image", "linux-base"):
         score -= 35
     return score
+
+
+_GIT_HASH_RE = re.compile(r"^[0-9a-f]{20,64}$", re.IGNORECASE)
 
 
 def _extract_package_and_fix(
@@ -501,7 +547,7 @@ def _extract_package_and_fix(
     pkg_name = package_hint
     fixed_ver = fixed_version_hint
     ecosystem = None
-    best_score = -999
+    best_score = -100
     text_lower = (
         f"{osv_data.get('summary') or ''} {osv_data.get('details') or ''}".lower()
     )
@@ -514,22 +560,24 @@ def _extract_package_and_fix(
         name = str(pkg.get("name") or "")
         cand_fixed = None
         for rng in aff.get("ranges") or []:
+            if not isinstance(rng, dict) or str(rng.get("type") or "").upper() == "GIT":
+                continue
             for ev in rng.get("events") or []:
                 if isinstance(ev, dict) and ev.get("fixed"):
-                    cand_fixed = str(ev["fixed"])
-                    break
+                    f_str = str(ev["fixed"]).strip()
+                    if f_str and not _GIT_HASH_RE.fullmatch(f_str):
+                        cand_fixed = f_str
+                        break
             if cand_fixed:
                 break
 
-        score = _score_osv_affected_entry(eco, name, text_lower)
-        if cand_fixed:
-            score += 5
+        score = _score_osv_affected_entry(eco, name, text_lower, bool(cand_fixed))
         if score > best_score:
             best_score = score
-            if not package_hint and name:
-                pkg_name = name
-            ecosystem = eco or ecosystem
-            if not fixed_version_hint and cand_fixed:
+            if not package_hint:
+                pkg_name = name or None
+            ecosystem = eco or None
+            if not fixed_version_hint:
                 fixed_ver = cand_fixed
     return pkg_name, fixed_ver, ecosystem
 

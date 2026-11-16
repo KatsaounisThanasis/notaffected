@@ -6,6 +6,7 @@ restricted to a closed set of read-only probe types (PROBE_TYPES).
 
 from __future__ import annotations
 
+import urllib.parse
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -204,7 +205,8 @@ class HostVerdict:
 
     def __post_init__(self) -> None:
         if not self.product_id:
-            self.product_id = f"pkg:generic/{self.os_family}-host@{self.host}"
+            safe_host = urllib.parse.quote(self.host, safe="-_.")
+            self.product_id = f"pkg:generic/{self.os_family}-host@{safe_host}"
 
     def to_dict(self) -> dict[str, Any]:
         return {

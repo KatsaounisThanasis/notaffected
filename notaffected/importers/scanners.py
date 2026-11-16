@@ -24,15 +24,24 @@ def parse_scanner_json(data: dict[str, Any] | str | Path) -> list[ScannedFinding
     if isinstance(data, Path):
         payload = json.loads(data.read_text(encoding="utf-8"))
     elif isinstance(data, str):
-        path_candidate = Path(data)
-        if "\n" not in data and not data.lstrip().startswith("{") and path_candidate.is_file():
-            payload = json.loads(path_candidate.read_text(encoding="utf-8"))
+        is_file_path = False
+        if "\n" not in data and len(data) <= 240 and not data.lstrip().startswith(("{", "[")):
+            try:
+                path_candidate = Path(data)
+                is_file_path = path_candidate.is_file()
+            except OSError:
+                is_file_path = False
+        if is_file_path:
+            payload = json.loads(Path(data).read_text(encoding="utf-8"))
         else:
             payload = json.loads(data)
     elif isinstance(data, dict):
         payload = data
     else:
         raise ValueError("Unsupported scanner input type")
+
+    if not isinstance(payload, dict):
+        raise ValueError("Scanner JSON payload must be a JSON object")
 
     findings: list[ScannedFinding] = []
     seen: set[tuple[str, str | None]] = set()
@@ -76,6 +85,13 @@ def parse_scanner_json(data: dict[str, Any] | str | Path) -> list[ScannedFinding
             artifact = match.get("artifact") or {}
             cve = str(vuln.get("id") or "").strip().upper()
             if not cve.startswith("CVE-"):
+                for rel in match.get("relatedVulnerabilities") or []:
+                    if isinstance(rel, dict):
+                        cand_id = str(rel.get("id") or "").strip().upper()
+                        if cand_id.startswith("CVE-"):
+                            cve = cand_id
+                            break
+            if not cve.startswith("CVE-"):
                 continue
             pkg = artifact.get("name")
             key = (cve, pkg)
@@ -83,8 +99,12 @@ def parse_scanner_json(data: dict[str, Any] | str | Path) -> list[ScannedFinding
                 continue
             seen.add(key)
             fix_block = vuln.get("fix") or {}
-            fix_versions = fix_block.get("versions") or []
-            fixed_ver = str(fix_versions[0]) if fix_versions else None
+            fix_versions = [
+                str(v).strip()
+                for v in (fix_block.get("versions") or [])
+                if v is not None and str(v).strip()
+            ]
+            fixed_ver = fix_versions[0] if fix_versions else None
             findings.append(
                 ScannedFinding(
                     cve_id=cve,

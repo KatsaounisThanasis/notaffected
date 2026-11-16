@@ -350,18 +350,20 @@ class MockRunner:
         key = tuple(argv)
         if key in self.responses:
             return self.responses[key]
-        if (
-            self.simulate_dpkg_db
-            and len(argv) == 4
-            and argv[0] == "dpkg-query"
-            and argv[1] == "-W"
-        ):
-            return CommandResult(
-                returncode=1,
-                stdout="",
-                stderr=f"dpkg-query: no packages found matching {argv[3]}\n",
-                transport_error=False,
-            )
+        if self.simulate_dpkg_db:
+            if len(argv) == 4 and argv[0] == "dpkg-query" and argv[1] == "-W":
+                return CommandResult(
+                    returncode=1,
+                    stdout="",
+                    stderr=f"dpkg-query: no packages found matching {argv[3]}\n",
+                    transport_error=False,
+                )
+            if len(argv) >= 2 and argv[0] == "systemctl" and argv[1] == "is-active":
+                return CommandResult(returncode=3, stdout="inactive\n", stderr="")
+            if len(argv) >= 3 and argv[0] == "sysctl" and argv[1] == "-n":
+                return CommandResult(returncode=0, stdout="1\n", stderr="")
+            if argv[0] == "powershell" and "Get-Service" in argv[-1]:
+                return CommandResult(returncode=0, stdout="Stopped\n", stderr="")
         return CommandResult(
             returncode=127,
             stdout="",

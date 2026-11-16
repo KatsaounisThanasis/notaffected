@@ -41,13 +41,16 @@ def run_probe(precondition: Precondition, runner: HostRunner) -> ProbeResult:
 
 
 def _normalize_kernel_release(uname_r: str) -> str:
-    """Strip flavor suffixes like '-generic', '-aws', '-azure' for version comparison."""
+    """Strip flavor suffixes like '-generic', '-aws', '-azure' and Ubuntu '.upload~backport' tags."""
     cleaned = uname_r.strip()
-    return re.sub(
+    cleaned = re.sub(r"~.*$", "", cleaned)
+    cleaned = re.sub(
         r"-(generic|lowlatency|aws|azure|gcp|kvm|virtual|oem|raspi|server).*$",
         "",
         cleaned,
     )
+    cleaned = re.sub(r"^(\d+\.\d+\.\d+-\d+)\.\d+.*$", r"\1", cleaned)
+    return cleaned
 
 
 def _probe_kernel_version(pre: Precondition, runner: HostRunner) -> ProbeResult:
@@ -179,17 +182,26 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
             matched_bin = ""
             matched_ver = ""
             if not src_res.transport_error and src_res.returncode == 0 and src_res.stdout:
+                candidates: list[tuple[str, str]] = []
                 for sline in src_res.stdout.splitlines():
                     sparts = sline.split("\t")
                     if len(sparts) >= 4 and sparts[0].strip().startswith("ii"):
-                        bin_name = sparts[1].strip()
-                        src_name = sparts[2].strip()
+                        bin_name = sparts[1].strip().split(":")[0]
+                        src_name = sparts[2].strip().split(" ")[0]
                         bin_ver = sparts[3].strip()
                         src_ver = sparts[4].strip() if len(sparts) > 4 else ""
                         if src_name == pkg:
-                            matched_bin = bin_name
-                            matched_ver = src_ver or bin_ver
-                            break
+                            candidates.append((bin_name, src_ver or bin_ver))
+                if candidates:
+                    preferred = next(
+                        (
+                            c
+                            for c in candidates
+                            if c[0] in (f"{pkg}-server", f"{pkg}d", "libc6")
+                        ),
+                        candidates[0],
+                    )
+                    matched_bin, matched_ver = preferred
             if matched_bin and matched_ver:
                 status_abbrev = "ii"
                 installed_ver = matched_ver
@@ -872,33 +884,45 @@ def _probe_windows_build_vulnerable(pre: Precondition, runner: HostRunner) -> Pr
         )
 
     if fixed_build:
-        fixed_parsed = _parse_win_build(fixed_build)
-        if fixed_parsed is None:
+        actual_major, actual_ubr = actual_parsed
+        raw_branches = [b.strip() for b in fixed_build.split(",") if b.strip()]
+        parsed_branches = [
+            (b, _parse_win_build(b)) for b in raw_branches
+        ]
+        valid_branches = [
+            (b_str, p[0], p[1]) for b_str, p in parsed_branches if p is not None
+        ]
+        if not valid_branches:
             return ProbeResult(
                 precondition=pre,
                 status=ProbeStatus.UNKNOWN,
                 evidence=f"Invalid fixed_build format '{fixed_build}'",
                 command=cmd_str,
             )
-        actual_major, actual_ubr = actual_parsed
-        fixed_major, fixed_ubr = fixed_parsed
-        if actual_major != fixed_major:
+        matched_branch = next(
+            ((b_str, fm, fu) for b_str, fm, fu in valid_branches if fm == actual_major),
+            None,
+        )
+        if matched_branch is None:
+            first_str, fixed_major, _ = valid_branches[0]
             return ProbeResult(
                 precondition=pre,
                 status=ProbeStatus.UNKNOWN,
                 evidence=(
                     f"Windows OS major build '{actual_major}' ({build_val}) differs from "
-                    f"target branch '{fixed_major}' ({fixed_build}) and '{kb or 'N/A'}' is not installed"
+                    f"target branch '{fixed_major}' ({first_str}) and '{kb or 'N/A'}' is not installed"
                 ),
                 command=cmd_str,
             )
+        matched_str, _, fixed_ubr = matched_branch
         if actual_ubr >= fixed_ubr:
             return ProbeResult(
                 precondition=pre,
                 status=ProbeStatus.NOT_MET,
-                evidence=f"Windows OS build '{build_val}' is >= fixed build '{fixed_build}'",
+                evidence=f"Windows OS build '{build_val}' is >= fixed build '{matched_str}'",
                 command=cmd_str,
             )
+        fixed_build = matched_str
 
     return ProbeResult(
         precondition=pre,

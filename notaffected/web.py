@@ -288,21 +288,24 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
         if len(non_builtin) > 1:
             fetch_advisories_concurrent(non_builtin)
         specs: list[CheckSpec] = [
-            resolve_check_spec(cid, use_llm=use_llm) for cid in cve_list
+            resolve_check_spec(cid, use_llm=use_llm, offline=offline)
+            for cid in cve_list
         ]
         feed_meta["total_cves"] = len(specs)
     elif scan_mode == "scanner_json":
         raw_report = payload.get("scanner_report")
         sample_path = Path("examples/trivy-scan.json")
+        explicit_report = isinstance(raw_report, (dict, str)) and bool(raw_report)
         try:
-            if isinstance(raw_report, (dict, str)) and raw_report:
+            if explicit_report:
                 findings = parse_scanner_json(raw_report)
             elif sample_path.is_file():
                 findings = parse_scanner_json(sample_path)
             else:
                 findings = []
-        except Exception:
+        except Exception as exc:
             findings = []
+            feed_meta["error"] = f"Invalid scanner JSON report: {exc}"
         non_builtin = [
             f.cve_id
             for f in findings[:MAX_CUSTOM_CVES]
@@ -310,21 +313,27 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
         ]
         if len(non_builtin) > 1:
             fetch_advisories_concurrent(non_builtin)
-        specs = []
-        seen_cves: set[str] = set()
+        grouped_findings: dict[str, Any] = {}
         for f in findings:
-            if f.cve_id in seen_cves or len(specs) >= MAX_CUSTOM_CVES:
-                continue
-            seen_cves.add(f.cve_id)
+            existing = grouped_findings.get(f.cve_id)
+            if existing is None:
+                grouped_findings[f.cve_id] = f
+            else:
+                pkg_cand = (f.package_name or "").lower()
+                if pkg_cand.endswith("-server") or pkg_cand.endswith("d"):
+                    grouped_findings[f.cve_id] = f
+        specs = []
+        for cid, f in list(grouped_findings.items())[:MAX_CUSTOM_CVES]:
             specs.append(
                 resolve_check_spec(
-                    f.cve_id,
+                    cid,
                     use_llm=use_llm,
                     package_hint=f.package_name,
                     fixed_version_hint=f.fixed_version,
+                    offline=offline,
                 )
             )
-        if not specs:
+        if not specs and not explicit_report:
             specs = list(BUILTIN_SPECS.values())
         feed_meta["total_cves"] = len(specs)
     else:
@@ -771,9 +780,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let latestResult = null;
 
     function esc(s) {
-      const div = document.createElement("div");
-      div.textContent = s == null ? "" : String(s);
-      return div.innerHTML;
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
     }
 
     function downloadBlob(filename, content, mimeType) {
@@ -1104,9 +1116,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/spec":
             qs = urllib.parse.parse_qs(parsed.query)
-            cve = (qs.get("cve") or [""])[0].strip()
-            if not cve:
-                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Missing cve query parameter"})
+            cve = (qs.get("cve") or [""])[0].strip().upper()
+            if not cve or not _CVE_TOKEN_RE.match(cve):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid or missing cve query parameter"})
                 return
             spec = resolve_check_spec(cve, use_llm=False)
             self._send_json(HTTPStatus.OK, spec.to_dict())

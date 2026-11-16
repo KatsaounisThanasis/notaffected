@@ -378,5 +378,88 @@ def test_osv_scoring_mitre_windows_and_fallback_verdict() -> None:
     assert verdict_unk.status == VerdictStatus.UNDER_INVESTIGATION
 
 
+def test_customer_audit_regressions() -> None:
+    from notaffected.advisories.extractor import extract_from_osv_payload
+    from notaffected.importers.scanners import parse_scanner_json
+    from notaffected.model import HostVerdict, Precondition, ProbeStatus, VerdictStatus
+    from notaffected.probes.primitives import _normalize_kernel_release, run_probe
+    from notaffected.web import DASHBOARD_HTML
+
+    # 1. Ubuntu kernel upload/backport normalization ('6.8.0-45.45' == '6.8.0-45-generic')
+    assert _normalize_kernel_release("6.8.0-45-generic") == "6.8.0-45"
+    assert _normalize_kernel_release("6.8.0-45.45") == "6.8.0-45"
+    assert _normalize_kernel_release("6.5.0-21.21~22.04.1") == "6.5.0-21"
+
+    # 2. Git commit SHAs in OSV GIT ranges are never leaked into fixed_version
+    osv_with_git_sha = {
+        "id": "CVE-2026-123158",
+        "summary": "OpenSSH unfixed advisory with upstream git range",
+        "affected": [
+            {
+                "package": {"ecosystem": "", "name": ""},
+                "ranges": [{"type": "GIT", "events": [{"fixed": "4353fdc43ef646c43a8dda7025cc1a898caf1482"}]}],
+            },
+            {
+                "package": {"ecosystem": "Ubuntu:24.04:LTS", "name": "openssh"},
+                "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}],
+            },
+        ],
+    }
+    spec_git = extract_from_osv_payload("CVE-2026-123158", osv_with_git_sha)
+    assert spec_git.patch.fixed_version is None
+    assert spec_git.preconditions[0].params["fixed_version"] == ""
+
+    # 3. Multi-branch Windows fixed_build matches Server 2019 (17763) and Server 2022 (20348)
+    ps_kb_cmd = (
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$cv = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'; "
+        "$build = \"$($cv.CurrentBuildNumber).$($cv.UBR)\"; "
+        "$kbs = @(Get-HotFix -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HotFixID) -join ','; "
+        "Write-Output \"BUILD=$build|KBS=$kbs\"",
+    )
+    win2019 = MockRunner(
+        host_name="win2019-01",
+        os_family="windows",
+        responses={ps_kb_cmd: CommandResult(0, "BUILD=17763.6100|KBS=\n", "")},
+    )
+    pre_multi = Precondition(
+        "windows_build_vulnerable",
+        {"fixed_build": "17763.6054,20348.2582"},
+        "Multi-branch check",
+    )
+    assert run_probe(pre_multi, win2019).status == ProbeStatus.NOT_MET
+
+    # 4. Grype GHSA match with CVE in relatedVulnerabilities is extracted
+    grype_ghsa = {
+        "matches": [
+            {
+                "vulnerability": {"id": "GHSA-xxxx-yyyy-zzzz", "fix": {"versions": ["1.2.3"]}, "severity": "High"},
+                "relatedVulnerabilities": [{"id": "CVE-2024-9999"}],
+                "artifact": {"name": "foo-server", "version": "1.0.0"},
+            }
+        ]
+    }
+    parsed_g = parse_scanner_json(grype_ghsa)
+    assert len(parsed_g) == 1
+    assert parsed_g[0].cve_id == "CVE-2024-9999"
+
+    # 5. HostVerdict PURL encodes '@', ':', and '/' safely
+    hv = HostVerdict(
+        host="ubuntu@10.0.0.15:2222",
+        cve_id="CVE-2024-6387",
+        status=VerdictStatus.NOT_AFFECTED,
+        reason="ok",
+        justification=None,
+    )
+    assert hv.product_id == "pkg:generic/linux-host@ubuntu%4010.0.0.15%3A2222"
+
+    # 6. DASHBOARD_HTML esc() escapes quotes to prevent attribute breakout
+    assert '.replace(/"/g, "&quot;")' in DASHBOARD_HTML
+
+
+
 
 
