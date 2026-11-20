@@ -473,9 +473,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       font-weight: 600;
     }
     main {
-      max-width: 1360px;
-      margin: 0 auto;
-      padding: 1.5rem 2rem 3rem;
+      width: 100%;
+      max-width: 100%;
+      margin: 0;
+      padding: 1.25rem 1.75rem 3rem;
     }
     .controls-grid {
       display: grid;
@@ -565,6 +566,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border-radius: 12px;
       padding: 1.25rem;
       margin-bottom: 1.5rem;
+      overflow-x: auto;
     }
     .section-header {
       display: flex;
@@ -586,6 +588,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     table {
       width: 100%;
+      table-layout: fixed;
       border-collapse: collapse;
       font-size: 0.9rem;
     }
@@ -594,12 +597,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 0.75rem;
       border-bottom: 1px solid var(--border);
       vertical-align: top;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
+    th:nth-child(1), td:nth-child(1) { width: 11%; }
+    th:nth-child(2), td:nth-child(2) { width: 7%; }
+    th:nth-child(3), td:nth-child(3) { width: 10%; }
+    th:nth-child(4), td:nth-child(4) { width: 11%; }
+    th:nth-child(5), td:nth-child(5) { width: 16%; }
+    th:nth-child(6), td:nth-child(6) { width: 45%; }
     th {
       color: var(--muted);
       font-size: 0.78rem;
       text-transform: uppercase;
       letter-spacing: 0.05em;
+    }
+    code {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      white-space: pre-wrap;
     }
     .badge {
       display: inline-block;
@@ -608,6 +624,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       font-size: 0.75rem;
       font-weight: 700;
       text-transform: uppercase;
+      max-width: 100%;
+      overflow-wrap: anywhere;
     }
     .badge.affected { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger); }
     .badge.not_affected { background: var(--ok-bg); color: var(--ok); border: 1px solid var(--ok); }
@@ -619,6 +637,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border-radius: 8px;
       padding: 1rem;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 0.85rem;
       margin: 0;
@@ -629,9 +649,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       gap: 0.45rem;
       margin-top: 0.35rem;
       flex-wrap: wrap;
+      max-width: 100%;
     }
     .mit-cmd {
-      flex: 1;
+      flex: 1 1 260px;
+      min-width: 0;
+      max-width: 100%;
       display: block;
       background: var(--bg);
       border: 1px solid var(--border);
@@ -640,6 +663,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       font-family: ui-monospace, SFMono-Regular, monospace;
       font-size: 0.8rem;
       color: #bae6fd;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
     button.mini {
       padding: 0.25rem 0.55rem;

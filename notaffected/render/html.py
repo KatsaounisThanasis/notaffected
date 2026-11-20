@@ -139,7 +139,7 @@ def build_html_report(
       color: var(--text);
       line-height: 1.5;
     }}
-    .container {{ max-width: 1200px; margin: 0 auto; }}
+    .container {{ width: 100%; max-width: 100%; margin: 0; }}
     header {{
       display: flex;
       justify-content: space-between;
@@ -198,6 +198,7 @@ def build_html_report(
     }}
     table {{
       width: 100%;
+      table-layout: fixed;
       border-collapse: collapse;
       background: var(--panel);
       border-radius: 8px;
@@ -208,11 +209,13 @@ def build_html_report(
       padding: 0.75rem 1rem;
       border-bottom: 1px solid var(--border);
       vertical-align: top;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }}
     th {{ background: #0f172a; color: var(--muted); font-size: 0.85rem; text-transform: uppercase; }}
-    .host-col {{ font-weight: 600; white-space: nowrap; }}
+    .host-col {{ font-weight: 600; }}
     .row-mit {{ margin-top: 0.5rem; padding: 0.5rem; background: #0f172a; border-radius: 4px; }}
-    code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; }}
+    code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap; }}
   </style>
 </head>
 <body>
