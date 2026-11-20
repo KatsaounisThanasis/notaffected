@@ -610,12 +610,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       overflow-wrap: anywhere;
       word-break: break-word;
     }
-    th:nth-child(1), td:nth-child(1) { width: 11%; }
-    th:nth-child(2), td:nth-child(2) { width: 7%; }
-    th:nth-child(3), td:nth-child(3) { width: 10%; }
-    th:nth-child(4), td:nth-child(4) { width: 11%; }
-    th:nth-child(5), td:nth-child(5) { width: 16%; }
-    th:nth-child(6), td:nth-child(6) { width: 45%; }
+    th:nth-child(1), td:nth-child(1) { width: 12%; }
+    th:nth-child(2), td:nth-child(2) { width: 8%; }
+    th:nth-child(3), td:nth-child(3) { width: 11%; white-space: nowrap; }
+    th:nth-child(4), td:nth-child(4) { width: 12%; }
+    th:nth-child(5), td:nth-child(5) { width: 17%; }
+    th:nth-child(6), td:nth-child(6) { width: 40%; }
     th {
       color: var(--muted);
       font-size: 0.78rem;
@@ -634,8 +634,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       font-size: 0.75rem;
       font-weight: 700;
       text-transform: uppercase;
-      max-width: 100%;
-      overflow-wrap: anywhere;
+      white-space: nowrap;
     }
     .badge.affected { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger); }
     .badge.not_affected { background: var(--ok-bg); color: var(--ok); border: 1px solid var(--ok); }

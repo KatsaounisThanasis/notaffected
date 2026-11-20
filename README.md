@@ -1,6 +1,13 @@
 # notaffected
 
+[![CI](https://github.com/KatsaounisThanasis/notaffected/actions/workflows/ci.yml/badge.svg)](https://github.com/KatsaounisThanasis/notaffected/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![OpenVEX v0.2.0](https://img.shields.io/badge/OpenVEX-v0.2.0-22c55e.svg)](https://openvex.dev/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-slate.svg)](LICENSE)
+
 **From 10,000 noisy CVE alerts down to the 3 that actually matter — with deterministic proof and OpenVEX output for all the rest.**
+
+![notaffected Web Dashboard](docs/dashboard.png)
 
 Every week dozens of new CVEs are published, and AI-assisted research is finding them faster than ever. Traditional vulnerability scanners (Trivy, Grype, Qualys, Nessus) only check package versions: *"You have package X at version Y, therefore you are vulnerable."* They do not know whether the vulnerable code path or service can actually be triggered on your machine. It is like a smoke alarm that goes off every time you make toast: eventually you either panic or mute it.
 

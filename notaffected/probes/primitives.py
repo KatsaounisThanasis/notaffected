@@ -334,25 +334,36 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
             command=cmd_str,
         )
 
-    cmp_res = runner.run(["dpkg", "--compare-versions", installed_ver, "lt", fixed_version])
-    if cmp_res.transport_error:
-        return ProbeResult(
-            precondition=pre,
-            status=ProbeStatus.UNKNOWN,
-            evidence=f"Transport error comparing versions for '{pkg_display}': {cmp_res.stderr.strip()}",
-            command=cmd_str,
-        )
-    if cmp_res.returncode == 127:
-        is_vuln = _fallback_version_lt(installed_ver, fixed_version)
-    elif cmp_res.returncode in (0, 1):
-        is_vuln = cmp_res.returncode == 0
+    if cmd_str.startswith("apk "):
+        apk_cmp = runner.run(["apk", "version", "-t", installed_ver, fixed_version])
+        if (
+            not apk_cmp.transport_error
+            and apk_cmp.returncode == 0
+            and apk_cmp.stdout.strip() in ("<", "=", ">")
+        ):
+            is_vuln = apk_cmp.stdout.strip() == "<"
+        else:
+            is_vuln = _fallback_version_lt(installed_ver, fixed_version)
     else:
-        return ProbeResult(
-            precondition=pre,
-            status=ProbeStatus.UNKNOWN,
-            evidence=f"Invalid version comparison for '{pkg_display}' ('{installed_ver}' vs '{fixed_version}'): {cmp_res.stderr.strip()}",
-            command=cmd_str,
-        )
+        cmp_res = runner.run(["dpkg", "--compare-versions", installed_ver, "lt", fixed_version])
+        if cmp_res.transport_error:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=f"Transport error comparing versions for '{pkg_display}': {cmp_res.stderr.strip()}",
+                command=cmd_str,
+            )
+        if cmp_res.returncode == 127:
+            is_vuln = _fallback_version_lt(installed_ver, fixed_version)
+        elif cmp_res.returncode in (0, 1):
+            is_vuln = cmp_res.returncode == 0
+        else:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=f"Invalid version comparison for '{pkg_display}' ('{installed_ver}' vs '{fixed_version}'): {cmp_res.stderr.strip()}",
+                command=cmd_str,
+            )
     if is_vuln:
         return ProbeResult(
             precondition=pre,
