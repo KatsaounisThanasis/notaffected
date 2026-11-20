@@ -550,6 +550,44 @@ def test_multi_release_fixes_apk_rpm_and_ui_inspect() -> None:
     assert "Inspect Probes &amp; Commands" in DASHBOARD_HTML
 
 
+def test_llm_hallucination_grounding_guards() -> None:
+    from notaffected.advisories.extractor import _is_grounded_llm_precondition
+    from notaffected.model import Precondition
+
+    curl_adv = "heap buffer overflow in curl socks5 proxy handshake"
+    assert not _is_grounded_llm_precondition(
+        Precondition("kernel_module_loaded", {"module": "curl"}, "bad"),
+        curl_adv,
+        is_kernel=False,
+    )
+    assert not _is_grounded_llm_precondition(
+        Precondition("config_contains", {"path": "/etc/curlrc", "pattern": "socks5_host"}, "bad"),
+        curl_adv,
+        is_kernel=False,
+    )
+    assert not _is_grounded_llm_precondition(
+        Precondition("systemd_service_active", {"service": "curl.service"}, "bad"),
+        curl_adv,
+        is_kernel=False,
+    )
+    assert not _is_grounded_llm_precondition(
+        Precondition("process_running", {"process": "msmq.exe"}, "bad"),
+        "microsoft message queuing remote code execution",
+        is_kernel=False,
+    )
+    assert _is_grounded_llm_precondition(
+        Precondition("windows_service_active", {"service": "MSMQ"}, "ok"),
+        "microsoft message queuing remote code execution",
+        is_kernel=False,
+    )
+    assert _is_grounded_llm_precondition(
+        Precondition("config_contains", {"path": "/etc/ssh/sshd_config", "pattern": "LoginGraceTime"}, "ok"),
+        "set logingracetime 0 in /etc/ssh/sshd_config",
+        is_kernel=False,
+    )
+
+
+
 
 
 

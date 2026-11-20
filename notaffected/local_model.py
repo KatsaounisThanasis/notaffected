@@ -190,7 +190,7 @@ def _build_http_request(
         "options": {
             "temperature": 0,
             "num_predict": max_tokens,
-            "num_ctx": 1536,
+            "num_ctx": 1024,
             "num_thread": cpu_threads,
         },
     }
@@ -269,7 +269,7 @@ def generate_json(
 ) -> dict[str, Any]:
     """generate() plus strict JSON dict parsing. Returns {} on any error."""
     try:
-        raw = generate(prompt, model=model, timeout=timeout, json_format=True)
+        raw = generate(prompt, model=model, timeout=timeout, json_format=True, max_tokens=320)
         cleaned = raw.strip()
         fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
         if fence_match:
@@ -283,3 +283,57 @@ def generate_json(
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def get_ai_status(timeout: float = 0.6) -> dict[str, Any]:
+    """Return lightweight status of the active AI provider without spawning any daemon."""
+    provider = detect_provider()
+    env_model = (os.environ.get("NOTAFFECTED_LLM_MODEL") or "").strip()
+    if provider == "ollama":
+        chosen = env_model or "qwen2.5-coder:1.5b"
+        base_url = (
+            os.environ.get("NOTAFFECTED_LLM_URL")
+            or os.environ.get("NOTAFFECTED_OLLAMA_URL")
+            or "http://127.0.0.1:11434/api/generate"
+        )
+        parsed = urllib.parse.urlparse(base_url)
+        tags_url = f"{parsed.scheme or 'http'}://{parsed.netloc or '127.0.0.1:11434'}/api/tags"
+        online = False
+        available_models: list[str] = []
+        try:
+            with urllib.request.urlopen(tags_url, timeout=timeout) as resp:
+                data = json.load(resp)
+            if isinstance(data, dict) and isinstance(data.get("models"), list):
+                online = True
+                available_models = [
+                    str(m.get("name")) for m in data["models"] if isinstance(m, dict) and m.get("name")
+                ]
+        except Exception:
+            online = False
+        return {
+            "provider": "ollama",
+            "model": chosen,
+            "online": online,
+            "local_only": True,
+            "available_models": available_models,
+        }
+    if provider == "claude-cli":
+        return {
+            "provider": "claude-cli",
+            "model": env_model or "claude-default",
+            "online": bool(shutil.which("claude")),
+            "local_only": False,
+        }
+    if provider == "agy-cli":
+        return {
+            "provider": "agy-cli",
+            "model": env_model or "Gemini 3.8 Flash (Medium)",
+            "online": bool(shutil.which("agy")),
+            "local_only": False,
+        }
+    return {
+        "provider": provider,
+        "model": env_model or "default",
+        "online": True,
+        "local_only": False,
+    }

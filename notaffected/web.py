@@ -27,6 +27,7 @@ from notaffected.inventory import (
     load_demo_fleet,
     load_runners,
 )
+from notaffected.local_model import get_ai_status
 from notaffected.model import CheckSpec, VerdictStatus
 from notaffected.probes.runner import (
     CommandResult,
@@ -406,6 +407,7 @@ def get_targets_metadata() -> dict[str, Any]:
     containers = discover_docker_containers()
     return {
         "version": __version__,
+        "ai_status": get_ai_status(),
         "docker_containers": containers,
         "has_lab_inventory": Path("lab/inventory.yaml").is_file(),
         "has_custom_inventory": Path("inventory.yaml").is_file(),
@@ -694,6 +696,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <h1>notaffected</h1>
       <span class="pill" id="verPill">Reachability &amp; OpenVEX Engine</span>
       <span class="pill" id="dockerCountPill">Docker Targets: ...</span>
+      <span class="pill" id="aiStatusPill">AI: Checking...</span>
     </div>
     <div class="btn-row">
       <button id="btnExportVex" disabled>Download OpenVEX (.vex.json)</button>
@@ -886,6 +889,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const customInvOpt = document.querySelector('#targetMode option[value="custom_inventory"]');
         if (customInvOpt && !data.has_custom_inventory) {
           customInvOpt.textContent = "Custom Inventory (inventory.yaml — not found)";
+        }
+        const ai = data.ai_status || {};
+        const aiPill = document.getElementById("aiStatusPill");
+        if (aiPill) {
+          const scope = ai.local_only ? "Local" : "External";
+          if (ai.online) {
+            aiPill.textContent = `AI: ${scope} ${ai.provider} Online (${ai.model})`;
+            aiPill.style.color = "var(--ok)";
+          } else {
+            aiPill.textContent = `AI: ${scope} ${ai.provider || "ollama"} Offline (Deterministic mode)`;
+            aiPill.style.color = "var(--muted)";
+          }
         }
       } catch (err) {
         console.error(err);

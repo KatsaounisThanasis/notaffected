@@ -6,7 +6,7 @@ and synthesizes a prioritized, service-aware remediation plan.
 
 from __future__ import annotations
 
-from notaffected.local_model import detect_provider, generate
+from notaffected.local_model import detect_provider, generate, get_ai_status
 from notaffected.model import CheckSpec, HostVerdict, VerdictStatus
 
 
@@ -16,39 +16,46 @@ def build_remediation_briefing(
     use_llm: bool = True,
 ) -> str:
     """Generate a host-aware remediation & operational impact briefing."""
-    actionable = [
-        v
-        for v in verdicts
-        if v.status in (VerdictStatus.AFFECTED, VerdictStatus.UNDER_INVESTIGATION)
-    ]
+    affected = [v for v in verdicts if v.status == VerdictStatus.AFFECTED]
+    under_inv = [v for v in verdicts if v.status == VerdictStatus.UNDER_INVESTIGATION]
+    actionable = affected + under_inv
     if not actionable:
         return "All evaluated hosts are deterministically NOT AFFECTED. No remediation actions required."
 
+    # Prioritize confirmed AFFECTED findings and keep prompt compact for fast local CPU models
+    provider = detect_provider()
+    max_items = 3 if provider == "ollama" else 8
+    max_toks = 180 if provider == "ollama" else 512
+    llm_items = actionable[:max_items]
     spec_map = {s.cve_id: s for s in specs}
     findings_lines: list[str] = []
-    for v in actionable:
+    for v in llm_items:
         spec = spec_map.get(v.cve_id)
         patch_str = v.patch.status if v.patch else "unknown"
-        short_reason = v.reason[:180]
-        short_mit = "; ".join(v.mitigation[:2]) or "None"
+        short_reason = v.reason[:120]
+        short_mit = (v.mitigation[0] if v.mitigation else "None")[:100]
         findings_lines.append(
-            f"- {v.host} ({v.os_family}) | {v.cve_id} ({spec.severity if spec else 'HIGH'}) "
-            f"| {v.status.value} | Patch: {patch_str}\n"
-            f"  Proof: {short_reason}\n"
-            f"  Mitigations: {short_mit}"
+            f"- {v.host} ({v.os_family}) {v.cve_id} [{spec.severity if spec else 'HIGH'}] "
+            f"Patch={patch_str} | Mit={short_mit} | Proof={short_reason}"
         )
 
     prompt = (
-        f"Output ONLY {len(findings_lines)} single-line bullet(s) (one per finding below, no intro text, no code blocks): "
-        "[Host/CVE] Risk | Safest mitigation avoiding active service disruption | Patch readiness.\n\n"
+        f"Write {len(findings_lines)} short bullets (max 18 words each, no intro): "
+        "[Host CVE] Risk & safest action.\n"
         + "\n".join(findings_lines)
     )
 
     if use_llm:
-        llm_reply = generate(prompt, timeout=90, json_format=False, max_tokens=240).strip()
+        llm_reply = generate(prompt, timeout=90, json_format=False, max_tokens=max_toks).strip()
         if llm_reply:
-            provider = detect_provider()
-            return f"[Provider: {provider}]\n{llm_reply}"
+            st = get_ai_status()
+            model_name = st.get("model") or "default"
+            extra_note = (
+                f"\n(Showing AI triage for top {len(llm_items)} of {len(actionable)} actionable findings)"
+                if len(actionable) > len(llm_items)
+                else ""
+            )
+            return f"[AI Provider: {provider} | Model: {model_name} | Local-Only: {st.get('local_only')}]\n{llm_reply}{extra_note}"
 
     # Deterministic host-aware operational triage when no LLM is reachable
     out_lines: list[str] = [

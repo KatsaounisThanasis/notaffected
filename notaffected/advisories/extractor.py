@@ -443,7 +443,7 @@ def extract_from_osv_payload(
             if ref_snippets:
                 enriched_text = f"{full_text}\n\n{ref_snippets}"
         llm_pres, llm_mitigations, llm_os = _extract_via_llm(
-            cve_id, enriched_text, os_family=os_family
+            cve_id, enriched_text, os_family=os_family, is_kernel=is_kernel
         )
         if llm_os in ("linux", "windows") and not is_kernel and not pkg_name:
             os_family = llm_os
@@ -636,15 +636,108 @@ def _extract_severity(osv_data: dict[str, Any]) -> str:
     return "HIGH"
 
 
+_NON_DAEMON_PACKAGES: frozenset[str] = frozenset(
+    {
+        "curl",
+        "openssl",
+        "glibc",
+        "libc6",
+        "runc",
+        "xz",
+        "xz-utils",
+        "util-linux",
+        "sudo",
+        "bash",
+        "python",
+        "python3",
+        "git",
+        "zlib",
+        "libxml2",
+        "busybox",
+    }
+)
+
+_KNOWN_WINDOWS_SERVICES: frozenset[str] = frozenset(
+    {
+        "msmq",
+        "spooler",
+        "termservlicensing",
+        "dns",
+        "dhcpserver",
+        "wsearch",
+        "wlansvc",
+        "w3svc",
+        "kdc",
+        "netlogon",
+    }
+)
+
+
+def _is_grounded_llm_precondition(
+    cand: Precondition,
+    advisory_text_lower: str,
+    is_kernel: bool,
+) -> bool:
+    """Reject common small-LLM hallucinations (e.g. kernel_module_loaded('curl'),
+    process_running('msmq.exe'), or systemd_service_active('curl.service')).
+    """
+    p = cand.probe
+    if p == "kernel_module_loaded":
+        mod = str(cand.params.get("module") or "").strip().lower().replace("-", "_")
+        return is_kernel and mod in KNOWN_KERNEL_MODULES
+
+    if p == "process_running":
+        proc = str(cand.params.get("process") or "").strip().lower()
+        base = proc[:-4] if proc.endswith(".exe") else proc
+        if not base or base in _NON_DAEMON_PACKAGES:
+            return False
+        if proc.endswith(".exe") and proc not in advisory_text_lower:
+            return False
+        return True
+
+    if p == "systemd_service_active":
+        svc = str(cand.params.get("service") or "").strip().lower()
+        base = svc[:-8] if svc.endswith(".service") else svc
+        if not base or base in _NON_DAEMON_PACKAGES:
+            return False
+        return True
+
+    if p == "windows_service_active":
+        svc = str(cand.params.get("service") or "").strip().lower()
+        if not svc:
+            return False
+        return svc in _KNOWN_WINDOWS_SERVICES or bool(
+            re.search(rf"\b{re.escape(svc)}\b", advisory_text_lower)
+        )
+
+    if p == "config_contains":
+        cfg_path = str(cand.params.get("path") or "").strip().lower()
+        return bool(cfg_path and cfg_path in advisory_text_lower)
+
+    if p == "sysctl_equals":
+        sys_key = str(cand.params.get("key") or "").strip().lower()
+        return bool(sys_key and sys_key in advisory_text_lower)
+
+    if p == "windows_registry_equals":
+        reg_name = str(cand.params.get("name") or "").strip().lower()
+        return bool(reg_name and reg_name in advisory_text_lower)
+
+    return True
+
+
 def _extract_via_llm(
     cve_id: str,
     advisory_text: str,
     os_family: str = "linux",
+    is_kernel: bool = False,
 ) -> tuple[list[Precondition], list[str], str]:
     """Ask the local/configured LLM to map advisory prose into closed PROBE_TYPES.
-    Drops any unrecognized probe type, cross-OS probe, missing required parameter, or malformed entry.
+    Drops any unrecognized probe type, cross-OS probe, hallucinated module/service,
+    missing required parameter, or malformed entry.
     """
     allowed_set = WINDOWS_ALLOWED_PROBES if os_family == "windows" else LINUX_ALLOWED_PROBES
+    if not is_kernel:
+        allowed_set = allowed_set - {"kernel_module_loaded", "kernel_version_vulnerable"}
     schema_lines = "\n".join(
         f"  - {probe}: required={list(req_keys)}, optional={list(PROBE_OPTIONAL_PARAMS.get(probe, ()))}"
         for probe, req_keys in sorted(PROBE_PARAM_SCHEMA.items())
@@ -667,7 +760,9 @@ def _extract_via_llm(
         )
     prompt = (
         f"Extract at most 2 deterministic {os_label} runtime preconditions for {cve_id}.\n"
-        "For Microsoft Message Queuing (MSMQ), use service='MSMQ'.\n"
+        "If the advisory is for a CLI tool or library (e.g. curl, openssl, glibc, runc, xz-utils) "
+        "with no always-running daemon or kernel module, return {\"os_family\": \"linux\", \"preconditions\": [], \"mitigation\": []}.\n"
+        "For Microsoft Message Queuing (MSMQ), use ONLY windows_service_active with service='MSMQ'.\n"
         f"Allowed probes:\n{schema_lines}\n"
         "Allowed justification_if_not_met: component_not_present, vulnerable_code_not_present, "
         "vulnerable_code_not_in_execute_path, inline_mitigations_already_exist.\n"
@@ -683,6 +778,7 @@ def _extract_via_llm(
         detected_os = os_family
     effective_allowed = WINDOWS_ALLOWED_PROBES if detected_os == "windows" else LINUX_ALLOWED_PROBES
     valid_justifications = {j.value for j in VexJustification}
+    adv_lower = advisory_text.lower()
 
     valid_preconditions: list[Precondition] = []
     for raw_p in resp.get("preconditions") or []:
@@ -705,9 +801,20 @@ def _extract_via_llm(
             continue
         if not validate_precondition_params(cand):
             continue
+        if not _is_grounded_llm_precondition(cand, adv_lower, is_kernel=is_kernel):
+            continue
         valid_preconditions.append(cand)
 
-    mitigations = [
-        str(m) for m in (resp.get("mitigation") or []) if isinstance(m, str) and m.strip()
-    ]
+    mitigations: list[str] = []
+    for m in resp.get("mitigation") or []:
+        if not isinstance(m, str) or not m.strip():
+            continue
+        m_low = m.strip().lower()
+        if not is_kernel and ("rmmod " in m_low or "modprobe " in m_low):
+            continue
+        if any(f"{nd}.service" in m_low for nd in _NON_DAEMON_PACKAGES):
+            continue
+        if "/etc/curlrc" in m_low or "/etc/runc/" in m_low:
+            continue
+        mitigations.append(m.strip())
     return valid_preconditions, mitigations, detected_os
