@@ -146,9 +146,75 @@ def _fallback_version_lt(v1: str, v2: str) -> bool:
     return parts(v1) < parts(v2)
 
 
+def _resolve_host_release_fix(
+    runner: HostRunner,
+    release_fixes: object,
+    installed_ver: str,
+    default_fix: str,
+) -> str:
+    """Select the distro-release-specific fixed version (e.g. ubuntu:22.04 vs ubuntu:24.04)."""
+    if not isinstance(release_fixes, dict) or not release_fixes:
+        return default_fix
+    m_tilde = re.search(r"~(\d{2}\.\d{2})\b", installed_ver)
+    if m_tilde:
+        k = f"ubuntu:{m_tilde.group(1)}"
+        if k in release_fixes:
+            return str(release_fixes[k])
+    os_res = runner.run(["cat", "/etc/os-release"])
+    if not os_res.transport_error and os_res.returncode == 0 and os_res.stdout:
+        distro_id = ""
+        ver_id = ""
+        for line in os_res.stdout.splitlines():
+            if line.startswith("ID="):
+                distro_id = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+            elif line.startswith("VERSION_ID="):
+                ver_id = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+        if distro_id == "alpine" and ver_id:
+            parts = ver_id.split(".")
+            if len(parts) >= 2:
+                ver_id = f"{parts[0]}.{parts[1]}"
+        if distro_id and ver_id:
+            key = f"{distro_id}:{ver_id}"
+            if key in release_fixes:
+                return str(release_fixes[key])
+    return default_fix
+
+
+def _try_apk_or_rpm_package(
+    pkg: str, runner: HostRunner
+) -> tuple[str | None, str | None, str] | None:
+    """Fallback package lookup for Alpine (`apk`) and RHEL/Rocky/Alma/Fedora (`rpm`) hosts."""
+    mock_resps = getattr(runner, "responses", None)
+    apk_cmd = ("apk", "info", "-v", pkg)
+    rpm_cmd = ("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\\n", pkg)
+
+    if mock_resps is None or apk_cmd in mock_resps:
+        apk_res = runner.run(list(apk_cmd))
+        if not apk_res.transport_error and apk_res.returncode != 127 and "unmocked command" not in apk_res.stderr.lower():
+            if apk_res.returncode != 0 or not apk_res.stdout.strip():
+                return ("absent", "", f"apk info -v {pkg}")
+            first = apk_res.stdout.strip().splitlines()[0].strip()
+            prefix = f"{pkg}-"
+            ver = first[len(prefix):] if first.startswith(prefix) else first
+            return ("ii", ver, f"apk info -v {pkg}")
+
+    if mock_resps is None or rpm_cmd in mock_resps:
+        rpm_res = runner.run(list(rpm_cmd))
+        if not rpm_res.transport_error and rpm_res.returncode != 127 and "unmocked command" not in rpm_res.stderr.lower():
+            if rpm_res.returncode != 0 or not rpm_res.stdout.strip():
+                if rpm_res.returncode == 1 or "not installed" in (rpm_res.stdout + rpm_res.stderr).lower():
+                    return ("absent", "", f"rpm -q {pkg}")
+                return None
+            first = rpm_res.stdout.strip().splitlines()[0].strip()
+            return ("ii", first, f"rpm -q {pkg}")
+
+    return None
+
+
 def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResult:
     pkg = str(pre.params.get("package") or "").strip()
     fixed_version = str(pre.params.get("fixed_version") or "").strip()
+    release_fixes = pre.params.get("release_fixes")
     if not pkg:
         return ProbeResult(
             precondition=pre,
@@ -213,6 +279,28 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
                     evidence=f"Package '{pkg}' is not installed (dpkg-query)",
                     command=cmd_str,
                 )
+        elif res.returncode == 127:
+            alt = _try_apk_or_rpm_package(pkg, runner)
+            if alt is not None:
+                alt_status, alt_ver, alt_cmd = alt
+                cmd_str = alt_cmd
+                if alt_status != "ii":
+                    mgr = "apk info" if alt_cmd.startswith("apk") else "rpm -q"
+                    return ProbeResult(
+                        precondition=pre,
+                        status=ProbeStatus.NOT_MET,
+                        evidence=f"Package '{pkg}' is not installed ({mgr})",
+                        command=cmd_str,
+                    )
+                status_abbrev = "ii"
+                installed_ver = alt_ver or ""
+            else:
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.UNKNOWN,
+                    evidence=f"Could not query package '{pkg}': {res.stderr.strip()}",
+                    command=cmd_str,
+                )
         else:
             return ProbeResult(
                 precondition=pre,
@@ -233,6 +321,10 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
             evidence=f"Package '{pkg}' is not installed (dpkg status='{status_abbrev or 'absent'}')",
             command=cmd_str,
         )
+
+    fixed_version = _resolve_host_release_fix(
+        runner, release_fixes, installed_ver, fixed_version
+    )
 
     if not fixed_version:
         return ProbeResult(

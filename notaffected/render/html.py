@@ -80,6 +80,26 @@ def build_html_report(
             cmds = "<br>".join(f"<code>$ {html.escape(m)}</code>" for m in v.mitigation)
             mit_inline = f"<div class='row-mit'><strong>Mitigation:</strong><br>{cmds}</div>"
 
+        probes_inline = ""
+        if v.probe_results:
+            p_lines = []
+            for idx, pr in enumerate(v.probe_results, 1):
+                p_st = html.escape(pr.status.value)
+                p_name = html.escape(pr.precondition.probe)
+                p_cmd = html.escape(pr.command or "n/a")
+                p_ev = html.escape(pr.evidence)
+                p_lines.append(
+                    f"<li><strong>#{idx} [{p_st}]</strong> <code>{p_name}</code> "
+                    f"&mdash; cmd: <code>{p_cmd}</code><br><span class='muted'>{p_ev}</span></li>"
+                )
+            probes_inline = (
+                f"<details style='margin-top:0.4rem;font-size:0.82rem;'>"
+                f"<summary style='cursor:pointer;color:var(--cyan);'>"
+                f"Inspect Probe Commands &amp; Audit Trail ({len(v.probe_results)})</summary>"
+                f"<ul style='margin:0.35rem 0 0;padding-left:1.2rem;'>{''.join(p_lines)}</ul>"
+                f"</details>"
+            )
+
         rows_html.append(
             f"""
             <tr data-status="{html.escape(st_val)}">
@@ -87,7 +107,7 @@ def build_html_report(
               <td><code>{html.escape(v.cve_id)}</code></td>
               <td><span class="badge {badge_cls}">{html.escape(st_val.upper())}</span></td>
               <td><code>{just_str}</code></td>
-              <td>{html.escape(v.reason)}{mit_inline}</td>
+              <td>{html.escape(v.reason)}{mit_inline}{probes_inline}</td>
             </tr>
             """
         )

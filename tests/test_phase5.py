@@ -460,6 +460,97 @@ def test_customer_audit_regressions() -> None:
     assert '.replace(/"/g, "&quot;")' in DASHBOARD_HTML
 
 
+def test_multi_release_fixes_apk_rpm_and_ui_inspect() -> None:
+    from notaffected.advisories.extractor import extract_from_osv_payload
+    from notaffected.model import Precondition, ProbeStatus
+    from notaffected.probes.primitives import run_probe
+    from notaffected.web import DASHBOARD_HTML
+
+    # 1. Multi-release Ubuntu OSV payload populates release_fixes and evaluates 22.04 host accurately
+    osv_multi = {
+        "id": "CVE-2024-2511",
+        "summary": "OpenSSL TLS server session cache vulnerability",
+        "affected": [
+            {
+                "package": {"ecosystem": "Ubuntu:24.04:LTS", "name": "openssl"},
+                "ranges": [{"events": [{"fixed": "3.0.13-0ubuntu3.2"}]}],
+            },
+            {
+                "package": {"ecosystem": "Ubuntu:22.04:LTS", "name": "openssl"},
+                "ranges": [{"events": [{"fixed": "3.0.2-0ubuntu1.16"}]}],
+            },
+        ],
+    }
+    spec = extract_from_osv_payload("CVE-2024-2511", osv_multi)
+    pre = spec.preconditions[0]
+    assert pre.params["release_fixes"]["ubuntu:22.04"] == "3.0.2-0ubuntu1.16"
+
+    jammy_runner = MockRunner(
+        host_name="ubuntu22-01",
+        responses={
+            ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "openssl"): CommandResult(
+                0, "ii \t3.0.2-0ubuntu1.17\n", ""
+            ),
+            ("cat", "/etc/os-release"): CommandResult(0, 'ID=ubuntu\nVERSION_ID="22.04"\n', ""),
+            ("dpkg", "--compare-versions", "3.0.2-0ubuntu1.17", "lt", "3.0.2-0ubuntu1.16"): CommandResult(
+                1, "", ""
+            ),
+        },
+    )
+    res_jammy = run_probe(pre, jammy_runner)
+    assert res_jammy.status == ProbeStatus.NOT_MET
+    assert "3.0.2-0ubuntu1.16" in res_jammy.evidence
+
+    # 2. Alpine apk and RHEL rpm package fallbacks when dpkg-query is absent (exit 127)
+    alpine_runner = MockRunner(
+        host_name="alpine-node",
+        responses={
+            ("apk", "info", "-v", "curl"): CommandResult(0, "curl-8.9.1-r1\n", ""),
+        },
+    )
+    pre_curl = Precondition(
+        "package_installed_vulnerable",
+        {"package": "curl", "fixed_version": "8.9.0-r0"},
+        "curl check",
+    )
+    res_apk = run_probe(pre_curl, alpine_runner)
+    assert res_apk.status == ProbeStatus.NOT_MET
+    assert res_apk.command == "apk info -v curl"
+
+    rhel_runner = MockRunner(
+        host_name="rhel-node",
+        responses={
+            ("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\\n", "httpd"): CommandResult(
+                1, "package httpd is not installed\n", ""
+            ),
+        },
+    )
+    pre_httpd = Precondition(
+        "package_installed_vulnerable",
+        {"package": "httpd", "fixed_version": "2.4.57-8.el9"},
+        "httpd check",
+    )
+    res_rpm = run_probe(pre_httpd, rhel_runner)
+    assert res_rpm.status == ProbeStatus.NOT_MET
+    assert "rpm -q" in res_rpm.evidence
+
+    # 3. Invalid custom_target returns explicit error in feed_meta instead of demo_fleet
+    bad_target_res = evaluate_dashboard_request(
+        {
+            "target_mode": "custom_target",
+            "custom_target_type": "ssh_linux",
+            "custom_target_value": "-oProxyCommand=evil",
+            "scan_mode": "custom_cves",
+            "cves": "CVE-2024-6387",
+            "offline": True,
+        }
+    )
+    assert bad_target_res["summary"]["hosts_evaluated"] == 0
+    assert "Invalid or empty custom target" in bad_target_res["feed_meta"]["error"]
+    assert "Inspect Probes &amp; Commands" in DASHBOARD_HTML
+
+
+
 
 
 

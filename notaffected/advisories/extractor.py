@@ -72,7 +72,7 @@ PROBE_PARAM_SCHEMA: dict[str, tuple[str, ...]] = {
 
 PROBE_OPTIONAL_PARAMS: dict[str, tuple[str, ...]] = {
     "kernel_version_vulnerable": ("min_version",),
-    "package_installed_vulnerable": ("fixed_version",),
+    "package_installed_vulnerable": ("fixed_version", "release_fixes"),
     "kernel_module_loaded": (),
     "sysctl_equals": (),
     "network_listener": ("port", "process", "scope"),
@@ -369,10 +369,18 @@ def extract_from_osv_payload(
             )
         )
     elif pkg_name and not is_windows:
+        pkg_params: dict[str, Any] = {
+            "package": pkg_name,
+            "fixed_version": fixed_ver or "",
+        }
+        if not fixed_version_hint:
+            rel_fixes = _extract_release_fixes(osv_data, pkg_name)
+            if len(rel_fixes) > 1:
+                pkg_params["release_fixes"] = rel_fixes
         preconditions.append(
             Precondition(
                 probe="package_installed_vulnerable",
-                params={"package": pkg_name, "fixed_version": fixed_ver or ""},
+                params=pkg_params,
                 description=(
                     f"Package '{pkg_name}' is installed"
                     + (f" and < {fixed_ver}" if fixed_ver else "")
@@ -580,6 +588,45 @@ def _extract_package_and_fix(
             if not fixed_version_hint:
                 fixed_ver = cand_fixed
     return pkg_name, fixed_ver, ecosystem
+
+
+def _extract_release_fixes(osv_data: dict[str, Any], pkg_name: str) -> dict[str, str]:
+    """Collect per-distro-release fixed versions (e.g. 'ubuntu:22.04' -> '3.0.2-0ubuntu1.16')
+    so a multi-release Ubuntu/Debian/Alpine fleet compares against each host's own release track.
+    """
+    target = pkg_name.strip().lower()
+    rel_fixes: dict[str, str] = {}
+    for aff in osv_data.get("affected") or []:
+        if not isinstance(aff, dict):
+            continue
+        pkg = aff.get("package") or {}
+        eco = str(pkg.get("ecosystem") or "")
+        name = str(pkg.get("name") or "").strip().lower()
+        eco_low = eco.lower()
+        if name != target or "pro:" in eco_low or "fips" in eco_low:
+            continue
+        rel_key = ""
+        m_ubu = re.search(r"ubuntu:(\d{2}\.\d{2})", eco_low)
+        m_deb = re.search(r"debian:(\d+)", eco_low)
+        m_alp = re.search(r"alpine:v?(\d+\.\d+)", eco_low)
+        if m_ubu:
+            rel_key = f"ubuntu:{m_ubu.group(1)}"
+        elif m_deb:
+            rel_key = f"debian:{m_deb.group(1)}"
+        elif m_alp:
+            rel_key = f"alpine:{m_alp.group(1)}"
+        if not rel_key:
+            continue
+        for rng in aff.get("ranges") or []:
+            if not isinstance(rng, dict) or str(rng.get("type") or "").upper() == "GIT":
+                continue
+            for ev in rng.get("events") or []:
+                if isinstance(ev, dict) and ev.get("fixed"):
+                    f_str = str(ev["fixed"]).strip()
+                    if f_str and not _GIT_HASH_RE.fullmatch(f_str):
+                        rel_fixes[rel_key] = f_str
+                        break
+    return rel_fixes
 
 
 def _extract_severity(osv_data: dict[str, Any]) -> str:

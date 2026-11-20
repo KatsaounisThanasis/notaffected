@@ -253,12 +253,6 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
     offline = bool(payload.get("offline", False))
     use_llm = bool(payload.get("use_llm", False))
 
-    runners = _build_runners_for_mode(
-        target_mode,
-        custom_target_type=custom_target_type,
-        custom_target_value=custom_target_value,
-    )
-
     feed_meta: dict[str, Any] = {
         "builtin_count": len(BUILTIN_SPECS),
         "osv_live_cves": [],
@@ -266,6 +260,27 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
         "total_cves": 0,
         "offline": offline,
     }
+
+    mode_low = target_mode.strip().lower()
+    if mode_low == "custom_inventory" and not Path("inventory.yaml").is_file():
+        runners: list[HostRunner] = []
+        feed_meta["error"] = (
+            "inventory.yaml not found in working directory "
+            "(run 'notaffected init --discover-docker' or select another target fleet)."
+        )
+    elif mode_low == "custom_target" and not (
+        custom_target_value.strip() and _SAFE_TARGET_RE.match(custom_target_value.strip())
+    ):
+        runners = []
+        feed_meta["error"] = (
+            f"Invalid or empty custom target address: {custom_target_value!r}"
+        )
+    else:
+        runners = _build_runners_for_mode(
+            target_mode,
+            custom_target_type=custom_target_type,
+            custom_target_value=custom_target_value,
+        )
 
     if scan_mode == "custom_cves":
         raw_cves = payload.get("cves") or []
@@ -704,6 +719,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <label style="font-size:0.84rem; color:var(--muted); display:flex; align-items:center; gap:0.35rem;">
           <input type="checkbox" id="chkOffline" /> Offline Only (Skip Live Feeds)
         </label>
+        <label style="font-size:0.84rem; color:var(--muted); display:flex; align-items:center; gap:0.35rem;">
+          <input type="checkbox" id="chkUseLlm" /> Use Local LLM (Ollama / AI Advisor)
+        </label>
       </div>
     </div>
 
@@ -778,6 +796,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <script>
     let latestResult = null;
+    let activeTargetConfig = {
+      target_mode: "docker_discovered",
+      custom_target_type: "docker_linux",
+      custom_target_value: "lab-ssh-vuln",
+    };
 
     function esc(s) {
       return String(s == null ? "" : s)
@@ -825,6 +848,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (count === 0 && !data.has_lab_inventory) {
           document.getElementById("targetMode").value = "demo_fleet";
         }
+        const customInvOpt = document.querySelector('#targetMode option[value="custom_inventory"]');
+        if (customInvOpt && !data.has_custom_inventory) {
+          customInvOpt.textContent = "Custom Inventory (inventory.yaml — not found)";
+        }
       } catch (err) {
         console.error(err);
       }
@@ -835,6 +862,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (!latestResult || !latestResult.verdicts) {
         tbody.innerHTML = '<tr><td colspan="6">No verdicts available.</td></tr>';
         return;
+      }
+      const specById = {};
+      for (const sp of (latestResult.specs || [])) {
+        if (sp && sp.cve_id) specById[sp.cve_id] = sp;
       }
       const stFilter = document.getElementById("filterStatus").value;
       const osFilter = document.getElementById("filterOs").value;
@@ -856,6 +887,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
 
       tbody.innerHTML = filtered.map((v) => {
+        const spec = specById[v.cve_id] || null;
         const justOrPatch = v.status === "not_affected"
           ? `<code>${esc(v.justification || "not_affected")}</code>`
           : `Patch: <strong>${esc(v.patch ? v.patch.status : "unknown")}</strong>` +
@@ -882,6 +914,51 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               `;
             }).join("")
           : "";
+
+        const probes = v.probe_results || [];
+        let probeListHtml = "";
+        if (probes.length > 0) {
+          probeListHtml = probes.map((pr, idx) => {
+            const pSt = String(pr.status || "UNKNOWN");
+            const pColor = pSt === "NOT_MET" ? "var(--ok)" : (pSt === "MET" ? "var(--danger)" : "var(--warn)");
+            const pName = pr.precondition ? pr.precondition.probe : "probe";
+            const pDesc = pr.precondition ? pr.precondition.description : "";
+            return `
+              <div style="margin-top:0.45rem; padding:0.45rem 0.65rem; background:var(--bg); border:1px solid var(--border); border-radius:6px; font-size:0.81rem;">
+                <div>
+                  <strong style="color:${pColor};">#${idx + 1} [${esc(pSt)}]</strong>
+                  <code>${esc(pName)}</code> &mdash; <span style="color:var(--muted);">${esc(pDesc)}</span>
+                </div>
+                <div style="margin-top:0.2rem;">Command: <code>${esc(pr.command || "n/a")}</code></div>
+                <div style="margin-top:0.15rem; color:var(--muted);">Output: ${esc(pr.evidence || "")}</div>
+              </div>
+            `;
+          }).join("");
+        } else if (spec && spec.preconditions && spec.preconditions.length > 0) {
+          probeListHtml = spec.preconditions.map((pre, idx) => `
+            <div style="margin-top:0.35rem; font-size:0.8rem; color:var(--muted);">
+              #${idx + 1} <code>${esc(pre.probe)}</code>: ${esc(pre.description)} (skipped due to OS mismatch)
+            </div>
+          `).join("");
+        } else {
+          probeListHtml = `<div style="margin-top:0.35rem; font-size:0.8rem; color:var(--muted);">No deterministic preconditions available for this advisory.</div>`;
+        }
+
+        const specMeta = spec
+          ? `Rule source: ${esc(spec.source)} | Confidence: ${esc(spec.confidence)} | Severity: ${esc(spec.severity)}`
+          : "";
+        const inspectDrawer = `
+          <details style="margin-top:0.45rem;">
+            <summary style="cursor:pointer; font-size:0.8rem; color:var(--accent); user-select:none;">
+              Inspect Probes &amp; Commands (${probes.length} executed${specMeta ? " — " + specMeta : ""})
+            </summary>
+            <div style="margin-top:0.35rem;">
+              ${spec ? `<div style="font-size:0.81rem; color:var(--text); margin-bottom:0.3rem;"><strong>Advisory:</strong> ${esc(spec.summary)}</div>` : ""}
+              ${probeListHtml}
+            </div>
+          </details>
+        `;
+
         return `
           <tr>
             <td><strong>${esc(v.host)}</strong></td>
@@ -892,6 +969,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <td>
               <div>${esc(v.reason)}</div>
               ${mitigationsHtml}
+              ${inspectDrawer}
             </td>
           </tr>
         `;
@@ -911,6 +989,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         scan_mode: document.getElementById("scanMode").value,
         cves: document.getElementById("cveInput").value,
         offline: document.getElementById("chkOffline").checked,
+        use_llm: document.getElementById("chkUseLlm").checked,
+      };
+      activeTargetConfig = {
+        target_mode: body.target_mode,
+        custom_target_type: body.custom_target_type,
+        custom_target_value: body.custom_target_value,
       };
       if (body.scan_mode === "scanner_json") {
         const fileEl = document.getElementById("scannerFileInput");
@@ -935,11 +1019,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById("briefingBox").textContent = latestResult.briefing || "";
 
         const fm = latestResult.feed_meta || {};
-        const osvCount = (fm.osv_live_cves || []).length;
-        const kevCount = (fm.cisa_kev_cves || []).length;
-        document.getElementById("feedBanner").textContent =
-          `Evaluated ${s.hosts_evaluated || 0} host(s) across ${s.cves_evaluated || 0} CVE(s) ` +
-          `[Built-in rules: ${fm.builtin_count || 0} | Live OSV package CVEs: ${osvCount} | Live CISA KEV CVEs: ${kevCount}]`;
+        const bannerEl = document.getElementById("feedBanner");
+        if (fm.error) {
+          bannerEl.style.color = "var(--danger)";
+          bannerEl.textContent = "Notice: " + fm.error;
+        } else {
+          bannerEl.style.color = "var(--muted)";
+          const osvCount = (fm.osv_live_cves || []).length;
+          const kevCount = (fm.cisa_kev_cves || []).length;
+          bannerEl.textContent =
+            `Evaluated ${s.hosts_evaluated || 0} host(s) across ${s.cves_evaluated || 0} CVE(s) ` +
+            `[Built-in rules: ${fm.builtin_count || 0} | Live OSV package CVEs: ${osvCount} | Live CISA KEV CVEs: ${kevCount}]`;
+        }
 
         document.getElementById("btnExportVex").disabled = false;
         document.getElementById("btnExportJson").disabled = false;
@@ -1009,9 +1100,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              target_mode: document.getElementById("targetMode").value,
-              custom_target_type: document.getElementById("customTargetType").value,
-              custom_target_value: document.getElementById("customTargetValue").value,
+              target_mode: activeTargetConfig.target_mode,
+              custom_target_type: activeTargetConfig.custom_target_type,
+              custom_target_value: activeTargetConfig.custom_target_value,
               host: applyHost,
               cve_id: applyCve,
               mitigation_index: applyIdx,
