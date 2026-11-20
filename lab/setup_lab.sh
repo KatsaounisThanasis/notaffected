@@ -12,12 +12,17 @@ echo "[1/4] Starting Linux container: lab-ssh-vuln (Vulnerable OpenSSH CVE-2024-
 docker run -d --name lab-ssh-vuln --label notaffected.lab=true --label notaffected.os=linux --memory 32m --cpus 0.1 "$IMAGE" sleep infinity >/dev/null
 docker exec lab-ssh-vuln sh -c '
   mkdir -p /etc/ssh /usr/local/bin
+  # The simulated host is Ubuntu 24.04 (noble packages), so per-release fixes resolve as on a real one.
+  printf "ID=ubuntu\nVERSION_ID=\"24.04\"\n" > /etc/os-release
   printf "Port 22\nPermitRootLogin no\nLoginGraceTime 120\n" > /etc/ssh/sshd_config
   echo "1:9.6p1-3ubuntu13" > /etc/ssh/openssh_version
 
   cat << "EOF" > /usr/local/bin/uname
 #!/bin/sh
-echo "6.8.0-45-generic"
+case "$1" in
+  -s) echo "Linux" ;;
+  *) echo "6.8.0-45-generic" ;;
+esac
 EOF
   chmod +x /usr/local/bin/uname
 
@@ -100,11 +105,16 @@ echo "[2/4] Starting Linux container: lab-ssh-mitigated (Mitigated OpenSSH CVE-2
 docker run -d --name lab-ssh-mitigated --label notaffected.lab=true --label notaffected.os=linux --memory 32m --cpus 0.1 "$IMAGE" sleep infinity >/dev/null
 docker exec lab-ssh-mitigated sh -c '
   mkdir -p /etc/ssh /usr/local/bin
+  # The simulated host is Ubuntu 24.04 (noble packages), so per-release fixes resolve as on a real one.
+  printf "ID=ubuntu\nVERSION_ID=\"24.04\"\n" > /etc/os-release
   printf "Port 22\nPermitRootLogin no\nLoginGraceTime 0\n" > /etc/ssh/sshd_config
 
   cat << "EOF" > /usr/local/bin/uname
 #!/bin/sh
-echo "6.8.0-45-generic"
+case "$1" in
+  -s) echo "Linux" ;;
+  *) echo "6.8.0-45-generic" ;;
+esac
 EOF
   chmod +x /usr/local/bin/uname
 
