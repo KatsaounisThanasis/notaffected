@@ -480,168 +480,444 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="notaffected-token" content="__NOTAFFECTED_TOKEN__" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230284c7'/><path d='M9 17l5 5 9-11' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230284c7'/><path d='M9 17l5 5 9-11' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
   <title>notaffected — Vulnerability Reachability &amp; OpenVEX Dashboard</title>
   <style>
     :root {
-      --bg: #0b0f19;
-      --panel: #111827;
-      --panel-alt: #1e293b;
-      --border: #334155;
-      --text: #f8fafc;
-      --muted: #94a3b8;
+      --bg: #070b14;
+      --bg-elevated: #0d1424;
+      --panel: rgba(15, 23, 42, 0.84);
+      --panel-solid: #0f172a;
+      --panel-alt: #162033;
+      --border: rgba(148, 163, 184, 0.16);
+      --border-strong: rgba(148, 163, 184, 0.28);
+      --text: #f1f5f9;
+      --text-soft: #cbd5e1;
+      --muted: #8b9bb4;
       --accent: #38bdf8;
-      --danger: #ef4444;
-      --danger-bg: rgba(239, 68, 68, 0.14);
-      --ok: #22c55e;
-      --ok-bg: rgba(34, 197, 94, 0.14);
-      --warn: #eab308;
-      --warn-bg: rgba(234, 179, 8, 0.14);
+      --accent-strong: #0284c7;
+      --accent-glow: rgba(56, 189, 248, 0.16);
+      --danger: #fb7185;
+      --danger-strong: #f43f5e;
+      --danger-bg: rgba(244, 63, 94, 0.13);
+      --ok: #34d399;
+      --ok-strong: #10b981;
+      --ok-bg: rgba(16, 185, 129, 0.13);
+      --warn: #fbbf24;
+      --warn-bg: rgba(245, 158, 11, 0.13);
+      --radius: 14px;
+      --radius-sm: 9px;
+      --shadow: 0 12px 32px rgba(2, 6, 23, 0.45);
     }
     * { box-sizing: border-box; }
-    body {
+    html, body {
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
+      padding: 0;
+      min-height: 100%;
+    }
+    body {
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg);
+      background-image:
+        radial-gradient(ellipse 80% 45% at 50% -12%, rgba(56, 189, 248, 0.13), transparent 70%),
+        radial-gradient(ellipse 50% 35% at 95% 10%, rgba(16, 185, 129, 0.06), transparent 65%);
+      background-attachment: fixed;
       color: var(--text);
       line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
     }
+
+    /* Sticky glass topbar */
     header {
+      position: sticky;
+      top: 0;
+      z-index: 30;
       border-bottom: 1px solid var(--border);
-      background: var(--panel);
-      padding: 1rem 2rem;
+      background: rgba(7, 11, 20, 0.82);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      padding: 0.85rem 1.75rem;
       display: flex;
       justify-content: space-between;
       align-items: center;
       flex-wrap: wrap;
-      gap: 1rem;
+      gap: 0.9rem;
     }
     .brand {
       display: flex;
       align-items: center;
       gap: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .brand-logo {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #0ea5e9, #2563eb);
+      box-shadow: 0 4px 14px rgba(14, 165, 233, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .brand-title {
+      display: flex;
+      flex-direction: column;
+      gap: 0.05rem;
+      margin-right: 0.4rem;
     }
     .brand h1 {
       margin: 0;
-      font-size: 1.35rem;
-      letter-spacing: -0.02em;
+      font-size: 1.18rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      line-height: 1.15;
+    }
+    .brand-sub {
+      font-size: 0.72rem;
+      color: var(--muted);
+      letter-spacing: 0.01em;
     }
     .pill {
-      font-size: 0.75rem;
-      padding: 0.2rem 0.6rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.42rem;
+      font-size: 0.74rem;
+      padding: 0.26rem 0.68rem;
       border-radius: 999px;
-      background: var(--panel-alt);
+      background: rgba(30, 41, 59, 0.75);
       border: 1px solid var(--border);
-      color: var(--accent);
+      color: var(--text-soft);
       font-weight: 600;
+      white-space: nowrap;
     }
+    .pill.accent { color: var(--accent); border-color: rgba(56, 189, 248, 0.28); background: rgba(56, 189, 248, 0.09); }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      display: inline-block;
+      flex-shrink: 0;
+    }
+    .status-dot.ok { background: var(--ok); box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.18); }
+    .status-dot.accent { background: var(--accent); box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18); }
+    .status-dot.warn { background: var(--warn); box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.18); }
+
     main {
       width: 100%;
       max-width: 100%;
       margin: 0;
-      padding: 1.25rem 1.75rem 3rem;
+      padding: 1.35rem 1.75rem 3rem;
+    }
+
+    /* Controls panel */
+    .controls-shell {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      padding: 1.2rem 1.3rem 1.05rem;
+      margin-bottom: 1.25rem;
     }
     .controls-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 1rem;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 1.25rem;
-      margin-bottom: 1.5rem;
+      gap: 0.95rem 1.1rem;
+      align-items: end;
+    }
+    .controls-footer {
+      margin-top: 1rem;
+      padding-top: 0.9rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.85rem;
     }
     .field label {
       display: block;
-      font-size: 0.8rem;
+      font-size: 0.72rem;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.06em;
       color: var(--muted);
-      margin-bottom: 0.4rem;
-      font-weight: 600;
+      margin-bottom: 0.38rem;
+      font-weight: 700;
     }
     select, input[type="text"] {
       width: 100%;
-      padding: 0.6rem 0.75rem;
-      border-radius: 8px;
+      padding: 0.58rem 0.78rem;
+      border-radius: var(--radius-sm);
       border: 1px solid var(--border);
-      background: var(--bg);
+      background: rgba(7, 11, 20, 0.85);
       color: var(--text);
-      font-size: 0.92rem;
+      font-size: 0.88rem;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      outline: none;
+    }
+    select:hover, input[type="text"]:hover {
+      border-color: var(--border-strong);
+    }
+    select:focus, input[type="text"]:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
     }
     .btn-row {
       display: flex;
-      align-items: flex-end;
-      gap: 0.6rem;
+      align-items: center;
+      gap: 0.55rem;
       flex-wrap: wrap;
     }
     button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.42rem;
       cursor: pointer;
-      padding: 0.62rem 1.1rem;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: var(--panel-alt);
+      padding: 0.56rem 0.98rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-strong);
+      background: rgba(30, 41, 59, 0.78);
       color: var(--text);
       font-weight: 600;
-      font-size: 0.9rem;
-      transition: filter 0.15s;
+      font-size: 0.84rem;
+      transition: transform 0.12s, background 0.15s, border-color 0.15s, box-shadow 0.15s;
+      white-space: nowrap;
     }
-    button:hover { filter: brightness(1.15); }
+    button:hover:not(:disabled) {
+      background: rgba(51, 65, 85, 0.85);
+      border-color: rgba(148, 163, 184, 0.45);
+    }
+    button:active:not(:disabled) {
+      transform: translateY(1px);
+    }
     button.primary {
-      background: #0284c7;
-      border-color: #38bdf8;
+      background: linear-gradient(135deg, #0ea5e9, #0284c7);
+      border-color: rgba(56, 189, 248, 0.65);
       color: #fff;
+      box-shadow: 0 4px 14px rgba(2, 132, 199, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    }
+    button.primary:hover:not(:disabled) {
+      background: linear-gradient(135deg, #38bdf8, #0284c7);
+      box-shadow: 0 6px 18px rgba(14, 165, 233, 0.44);
+    }
+    button.ghost {
+      background: transparent;
+      border-color: var(--border);
+      color: var(--text-soft);
+      padding: 0.46rem 0.78rem;
+      font-size: 0.8rem;
+    }
+    button.ghost:hover:not(:disabled) {
+      background: rgba(30, 41, 59, 0.65);
+      color: var(--text);
+    }
+    /* The one action that changes a host: outlined in the warning colour, never the loudest button. */
+    button.caution {
+      background: transparent;
+      border-color: rgba(251, 191, 36, 0.45);
+      color: var(--warn);
+    }
+    button.caution:hover:not(:disabled) {
+      background: var(--warn-bg);
+      border-color: var(--warn);
     }
     button:disabled {
-      opacity: 0.55;
-      cursor: wait;
+      opacity: 0.45;
+      cursor: not-allowed;
     }
+    button svg {
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+    }
+
+    /* Toggle switches */
+    .toggles-group {
+      display: flex;
+      align-items: center;
+      gap: 1.1rem;
+      flex-wrap: wrap;
+    }
+    .switch-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      font-size: 0.82rem;
+      color: var(--text-soft);
+      user-select: none;
+    }
+    .switch-label input[type="checkbox"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 34px;
+      height: 19px;
+      border-radius: 999px;
+      background: rgba(51, 65, 85, 0.9);
+      border: 1px solid var(--border-strong);
+      position: relative;
+      cursor: pointer;
+      transition: background 0.18s, border-color 0.18s;
+      margin: 0;
+      flex-shrink: 0;
+    }
+    .switch-label input[type="checkbox"]::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: #e2e8f0;
+      transition: transform 0.18s;
+    }
+    .switch-label input[type="checkbox"]:checked {
+      background: var(--accent-strong);
+      border-color: var(--accent);
+    }
+    .switch-label input[type="checkbox"]:checked::after {
+      transform: translateX(15px);
+      background: #fff;
+    }
+
+    /* Status strip */
+    .feed-banner {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+      background: rgba(15, 23, 42, 0.55);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.52rem 0.9rem;
+      margin-bottom: 1.25rem;
+    }
+
+    /* KPI cards */
     .kpi-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1.5rem;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 0.95rem;
+      margin-bottom: 1.35rem;
     }
     .kpi-card {
+      position: relative;
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 1rem 1.2rem;
+      border-radius: var(--radius);
+      padding: 1.05rem 1.15rem;
+      box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      overflow: hidden;
+      transition: transform 0.15s, border-color 0.15s;
+    }
+    .kpi-card.clickable { cursor: pointer; }
+    .kpi-card.clickable:hover {
+      transform: translateY(-2px);
+      border-color: var(--border-strong);
+    }
+    .kpi-card::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: var(--border-strong);
+    }
+    .kpi-card.kpi-danger::before { background: linear-gradient(90deg, var(--danger-strong), var(--danger)); }
+    .kpi-card.kpi-ok::before { background: linear-gradient(90deg, var(--ok-strong), var(--ok)); }
+    .kpi-card.kpi-warn::before { background: linear-gradient(90deg, #d97706, var(--warn)); }
+    .kpi-card.kpi-accent::before { background: linear-gradient(90deg, #0284c7, var(--accent)); }
+    .kpi-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.5rem;
     }
     .kpi-card .label {
-      font-size: 0.8rem;
+      font-size: 0.72rem;
       color: var(--muted);
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.06em;
+      font-weight: 700;
     }
     .kpi-card .val {
-      font-size: 1.9rem;
-      font-weight: 700;
-      margin-top: 0.2rem;
+      font-size: 2rem;
+      font-weight: 800;
+      margin-top: 0.3rem;
+      line-height: 1.1;
+      letter-spacing: -0.03em;
+      font-variant-numeric: tabular-nums;
     }
+    /* Hierarchy: affected is the headline when it is non-zero; the raw total is context. */
+    .kpi-card.kpi-hot {
+      background: linear-gradient(160deg, rgba(244, 63, 94, 0.17), var(--panel) 65%);
+      border-color: rgba(244, 63, 94, 0.45);
+      box-shadow: var(--shadow), 0 0 0 1px rgba(244, 63, 94, 0.16), 0 8px 28px rgba(244, 63, 94, 0.14);
+    }
+    .kpi-card.kpi-hot .val { font-size: 2.6rem; }
+    .kpi-card.kpi-muted .val { color: var(--text-soft); font-size: 1.6rem; }
     .val.danger { color: var(--danger); }
     .val.ok { color: var(--ok); }
     .val.warn { color: var(--warn); }
     .val.accent { color: var(--accent); }
+    .kpi-bar {
+      margin-top: 0.55rem;
+      height: 5px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.14);
+      overflow: hidden;
+    }
+    .kpi-bar-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #0ea5e9, #34d399);
+      transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    /* Section cards */
     .section-card {
       background: var(--panel);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 1.25rem;
-      margin-bottom: 1.5rem;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      padding: 1.2rem 1.3rem;
+      margin-bottom: 1.35rem;
       overflow-x: auto;
     }
     .section-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      gap: 1rem;
+      gap: 0.9rem;
       flex-wrap: wrap;
       margin-bottom: 1rem;
     }
+    .section-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
     .section-header h2 {
       margin: 0;
-      font-size: 1.1rem;
+      font-size: 1.02rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+    .count-chip {
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 0.16rem 0.52rem;
+      border-radius: 999px;
+      background: rgba(56, 189, 248, 0.12);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      font-variant-numeric: tabular-nums;
     }
     .filter-bar {
       display: flex;
@@ -649,68 +925,179 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       flex-wrap: wrap;
       align-items: center;
     }
+    .seg-group {
+      display: inline-flex;
+      background: rgba(7, 11, 20, 0.75);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 2px;
+      gap: 2px;
+    }
+    .seg-btn {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      padding: 0.34rem 0.65rem;
+      font-size: 0.76rem;
+      font-weight: 600;
+      border-radius: 7px;
+      box-shadow: none;
+    }
+    .seg-btn:hover:not(:disabled) {
+      background: rgba(30, 41, 59, 0.75);
+      color: var(--text);
+    }
+    .seg-btn.active {
+      background: rgba(56, 189, 248, 0.18);
+      color: var(--accent);
+    }
+    .search-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+    .search-wrap svg {
+      position: absolute;
+      left: 0.65rem;
+      width: 14px;
+      height: 14px;
+      color: var(--muted);
+      pointer-events: none;
+    }
+    .search-wrap input[type="text"] {
+      padding-left: 2rem;
+      width: 225px;
+      font-size: 0.83rem;
+      padding-top: 0.44rem;
+      padding-bottom: 0.44rem;
+    }
+    .filter-bar select {
+      width: auto;
+      font-size: 0.82rem;
+      padding: 0.44rem 0.7rem;
+    }
+
+    /* Table: its own scroll box, so the header can stay visible and the page stays short */
+    .table-scroll {
+      max-height: calc(100vh - 150px);
+      overflow: auto;
+      border-radius: 9px;
+    }
     table {
       width: 100%;
       min-width: 980px;
       table-layout: fixed;
-      border-collapse: collapse;
-      font-size: 0.9rem;
+      border-collapse: separate;
+      border-spacing: 0;
+      font-size: 0.875rem;
     }
-    th, td {
-      text-align: left;
-      padding: 0.75rem;
+    thead th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--panel-solid);
+      color: var(--muted);
+      font-size: 0.71rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.72rem 0.75rem;
+      border-top: 1px solid var(--border);
       border-bottom: 1px solid var(--border);
+      text-align: left;
+    }
+    thead th:first-child { border-top-left-radius: 9px; border-left: 1px solid var(--border); }
+    thead th:last-child { border-top-right-radius: 9px; border-right: 1px solid var(--border); }
+    tbody td {
+      text-align: left;
+      padding: 0.82rem 0.75rem;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.1);
       vertical-align: top;
       overflow-wrap: anywhere;
       word-break: break-word;
     }
-    th:nth-child(1), td:nth-child(1) { width: 145px; }
+    tbody tr {
+      transition: background 0.12s;
+    }
+    tbody tr:hover {
+      background: rgba(30, 41, 59, 0.38);
+    }
+    tbody tr.row-affected td:first-child {
+      box-shadow: inset 3px 0 0 var(--danger-strong);
+    }
+    tbody tr.row-affected {
+      background: rgba(244, 63, 94, 0.035);
+    }
+    tbody tr.row-affected:hover {
+      background: rgba(244, 63, 94, 0.075);
+    }
+    th:nth-child(1), td:nth-child(1) { width: 150px; }
     th:nth-child(2), td:nth-child(2) { width: 96px; }
-    th:nth-child(3), td:nth-child(3) { width: 138px; white-space: nowrap; }
+    th:nth-child(3), td:nth-child(3) { width: 172px; white-space: nowrap; }
     th:nth-child(4), td:nth-child(4) { width: 186px; }
     th:nth-child(5), td:nth-child(5) { width: 18%; }
     th:nth-child(6), td:nth-child(6) { width: auto; }
-    th {
-      color: var(--muted);
-      font-size: 0.78rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
+
     code {
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.82rem;
       overflow-wrap: anywhere;
       word-break: break-word;
       white-space: pre-wrap;
     }
-    .badge {
-      display: inline-block;
-      padding: 0.18rem 0.55rem;
+    .cve-code {
+      color: #e2e8f0;
+      font-weight: 600;
+      background: rgba(30, 41, 59, 0.65);
+      padding: 0.16rem 0.48rem;
       border-radius: 6px;
-      font-size: 0.75rem;
-      font-weight: 700;
-      text-transform: uppercase;
+      border: 1px solid var(--border);
+      display: inline-block;
       white-space: nowrap;
     }
-    .badge.affected { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger); }
-    .badge.not_affected { background: var(--ok-bg); color: var(--ok); border: 1px solid var(--ok); }
-    .badge.under_investigation { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn); }
-    .badge.os { background: var(--panel-alt); color: var(--accent); border: 1px solid var(--border); }
-    pre.briefing {
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      word-break: break-word;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 0.85rem;
-      margin: 0;
+    .just-code {
+      color: #a7f3d0;
+      background: rgba(16, 185, 129, 0.08);
+      padding: 0.16rem 0.42rem;
+      border-radius: 6px;
+      border: 1px solid rgba(16, 185, 129, 0.22);
+      display: inline-block;
+      font-size: 0.77rem;
     }
+
+    /* Badges */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.36rem;
+      padding: 0.22rem 0.6rem;
+      border-radius: 999px;
+      font-size: 0.71rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+    }
+    .badge::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      flex-shrink: 0;
+    }
+    .badge.affected { background: var(--danger-bg); color: var(--danger); border: 1px solid rgba(244, 63, 94, 0.38); }
+    .badge.not_affected { background: var(--ok-bg); color: var(--ok); border: 1px solid rgba(16, 185, 129, 0.35); }
+    .badge.under_investigation { background: var(--warn-bg); color: var(--warn); border: 1px solid rgba(245, 158, 11, 0.38); }
+    .badge.os { background: rgba(30, 41, 59, 0.8); color: var(--accent); border: 1px solid rgba(56, 189, 248, 0.25); }
+    .badge.os::before { display: none; }
+
+    /* Mitigation command rows */
     .mit-row {
       display: flex;
       align-items: center;
       gap: 0.45rem;
-      margin-top: 0.35rem;
+      margin-top: 0.5rem;
       flex-wrap: wrap;
       max-width: 100%;
     }
@@ -719,146 +1106,266 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       min-width: 0;
       max-width: 100%;
       display: block;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 0.35rem 0.6rem;
-      font-family: ui-monospace, SFMono-Regular, monospace;
-      font-size: 0.8rem;
+      background: rgba(7, 11, 20, 0.92);
+      border: 1px solid rgba(56, 189, 248, 0.24);
+      border-radius: 8px;
+      padding: 0.42rem 0.68rem;
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.79rem;
       color: #bae6fd;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       word-break: break-word;
     }
     button.mini {
-      padding: 0.25rem 0.55rem;
-      font-size: 0.75rem;
-      border-radius: 6px;
+      padding: 0.3rem 0.62rem;
+      font-size: 0.74rem;
+      border-radius: 7px;
     }
-    .feed-banner {
-      font-size: 0.84rem;
-      color: var(--muted);
-      margin-bottom: 1rem;
+
+    /* Probe details drawer */
+    details.probe-drawer {
+      margin-top: 0.52rem;
+    }
+    details.probe-drawer summary {
+      cursor: pointer;
+      font-size: 0.78rem;
+      color: var(--accent);
+      font-weight: 600;
+      user-select: none;
+      list-style: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem 0.45rem;
+      border-radius: 6px;
+      background: rgba(56, 189, 248, 0.08);
+      border: 1px solid rgba(56, 189, 248, 0.18);
+      transition: background 0.15s;
+    }
+    details.probe-drawer summary::-webkit-details-marker { display: none; }
+    details.probe-drawer summary::before {
+      content: "▸";
+      font-size: 0.72rem;
+      transition: transform 0.15s;
+    }
+    details.probe-drawer[open] summary::before {
+      transform: rotate(90deg);
+    }
+    details.probe-drawer summary:hover {
+      background: rgba(56, 189, 248, 0.15);
+    }
+    .probe-item {
+      margin-top: 0.48rem;
+      padding: 0.55rem 0.75rem;
+      background: rgba(7, 11, 20, 0.85);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--border-strong);
+      border-radius: 8px;
+      font-size: 0.8rem;
+    }
+    .probe-item.st-not_met { border-left-color: var(--ok); }
+    .probe-item.st-met { border-left-color: var(--danger); }
+    .probe-item.st-unknown { border-left-color: var(--warn); }
+
+    /* Briefing box */
+    pre.briefing {
+      background: rgba(7, 11, 20, 0.88);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.05rem 1.15rem;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.83rem;
+      line-height: 1.6;
+      color: var(--text-soft);
+      margin: 0;
+    }
+
+    /* Hidden select synced with segmented buttons for backward compatibility */
+    .sr-select {
+      display: none;
     }
   </style>
 </head>
 <body>
   <header>
     <div class="brand">
-      <h1>notaffected</h1>
-      <span class="pill" id="verPill">Reachability &amp; OpenVEX Engine</span>
+      <div class="brand-logo" aria-hidden="true">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          <path d="m9 12 2 2 4-4"/>
+        </svg>
+      </div>
+      <div class="brand-title">
+        <h1>notaffected</h1>
+        <span class="brand-sub">Deterministic Reachability &amp; OpenVEX Engine</span>
+      </div>
+      <span class="pill accent" id="verPill">v1.0.0</span>
       <span class="pill" id="dockerCountPill">Docker Targets: ...</span>
       <span class="pill" id="aiStatusPill">AI: Checking...</span>
     </div>
     <div class="btn-row">
-      <button id="btnExportVex" disabled>Download OpenVEX (.vex.json)</button>
-      <button id="btnExportJson" disabled>Download Audit JSON</button>
-      <button id="btnExportHtml" disabled>Download Standalone HTML</button>
+      <button class="ghost" id="btnExportVex" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        OpenVEX (.vex.json)
+      </button>
+      <button class="ghost" id="btnExportJson" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        Audit JSON
+      </button>
+      <button class="ghost" id="btnExportHtml" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        HTML Report
+      </button>
     </div>
   </header>
 
   <main>
-    <div class="controls-grid">
-      <div class="field">
-        <label for="targetMode">1. Target Fleet</label>
-        <select id="targetMode">
-          <option value="docker_discovered">Running Docker Lab Containers (Auto-Discover)</option>
-          <option value="lab_inventory">Lab Inventory (lab/inventory.yaml)</option>
-          <option value="custom_inventory">Custom Inventory (inventory.yaml)</option>
-          <option value="demo_fleet">Simulated Demo Fleet (3 Linux + 2 Windows Server)</option>
-          <option value="local">Local Machine (localhost)</option>
-          <option value="custom_target">Custom Target (Single Docker Container / SSH Host)</option>
-        </select>
-      </div>
-
-      <div class="field" id="customTargetField" style="display:none;">
-        <label for="customTargetValue">Custom Target Type &amp; Address</label>
-        <div style="display:flex; gap:0.5rem;">
-          <select id="customTargetType" style="width:48%;">
-            <option value="docker_linux">Docker (Linux)</option>
-            <option value="docker_windows">Docker (Win-Sim)</option>
-            <option value="ssh_linux">SSH (Linux)</option>
-            <option value="ssh_windows">SSH (Windows)</option>
+    <div class="controls-shell">
+      <div class="controls-grid">
+        <div class="field">
+          <label for="targetMode">1. Target Fleet</label>
+          <select id="targetMode">
+            <option value="docker_discovered">Running Docker Lab Containers (Auto-Discover)</option>
+            <option value="lab_inventory">Lab Inventory (lab/inventory.yaml)</option>
+            <option value="custom_inventory">Custom Inventory (inventory.yaml)</option>
+            <option value="demo_fleet">Simulated Demo Fleet (3 Linux + 2 Windows Server)</option>
+            <option value="local">Local Machine (localhost)</option>
+            <option value="custom_target">Custom Target (Single Docker Container / SSH Host)</option>
           </select>
-          <input type="text" id="customTargetValue" placeholder="e.g. lab-ssh-vuln or ubuntu@10.0.0.15" value="lab-ssh-vuln" style="width:52%;" />
+        </div>
+
+        <div class="field" id="customTargetField" style="display:none;">
+          <label for="customTargetValue">Custom Target Type &amp; Address</label>
+          <div style="display:flex; gap:0.5rem;">
+            <select id="customTargetType" style="width:48%;">
+              <option value="docker_linux">Docker (Linux)</option>
+              <option value="docker_windows">Docker (Win-Sim)</option>
+              <option value="ssh_linux">SSH (Linux)</option>
+              <option value="ssh_windows">SSH (Windows)</option>
+            </select>
+            <input type="text" id="customTargetValue" placeholder="e.g. lab-ssh-vuln or ubuntu@10.0.0.15" value="lab-ssh-vuln" style="width:52%;" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="scanMode">2. Evaluation Mode</label>
+          <select id="scanMode">
+            <option value="live_scan">Auto-Scan (Built-in + Live OSV Packages + CISA KEV Feed)</option>
+            <option value="custom_cves">Specific CVE ID(s)</option>
+            <option value="scanner_json">Filter Trivy / Grype JSON Report</option>
+          </select>
+        </div>
+
+        <div class="field" id="customCveField" style="display:none;">
+          <label for="cveInput">CVE IDs (comma or space separated)</label>
+          <input type="text" id="cveInput" placeholder="e.g. CVE-2024-6387, CVE-2024-38063, CVE-2021-34527" value="CVE-2024-6387, CVE-2024-38063, CVE-2021-34527" />
+        </div>
+
+        <div class="field" id="scannerJsonField" style="display:none;">
+          <label for="scannerFileInput">Trivy / Grype JSON File (leave empty for examples/trivy-scan.json)</label>
+          <input type="file" id="scannerFileInput" accept=".json,application/json" style="color:var(--muted); font-size:0.84rem;" />
         </div>
       </div>
 
-      <div class="field">
-        <label for="scanMode">2. Evaluation Mode</label>
-        <select id="scanMode">
-          <option value="live_scan">Auto-Scan (Built-in + Live OSV Packages + CISA KEV Feed)</option>
-          <option value="custom_cves">Specific CVE ID(s)</option>
-          <option value="scanner_json">Filter Trivy / Grype JSON Report</option>
-        </select>
-      </div>
+      <div class="controls-footer">
+        <div class="btn-row">
+          <button class="primary" id="btnRun">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            Run Reachability Proof
+          </button>
+          <button id="btnResetLab" title="Restore Demo Fleet and Docker Lab containers to initial vulnerable state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+            Reset Lab / Demo
+          </button>
+        </div>
 
-      <div class="field" id="customCveField" style="display:none;">
-        <label for="cveInput">CVE IDs (comma or space separated)</label>
-        <input type="text" id="cveInput" placeholder="e.g. CVE-2024-6387, CVE-2024-38063, CVE-2021-34527" value="CVE-2024-6387, CVE-2024-38063, CVE-2021-34527" />
-      </div>
-
-      <div class="field" id="scannerJsonField" style="display:none;">
-        <label for="scannerFileInput">Trivy / Grype JSON File (leave empty for examples/trivy-scan.json)</label>
-        <input type="file" id="scannerFileInput" accept=".json,application/json" style="color:var(--muted); font-size:0.85rem;" />
-      </div>
-
-      <div class="btn-row">
-        <button class="primary" id="btnRun">Run Reachability Proof</button>
-        <button id="btnResetLab" title="Restore Demo Fleet and Docker Lab containers to initial vulnerable state">Reset Lab / Demo</button>
-        <label style="font-size:0.84rem; color:var(--muted); display:flex; align-items:center; gap:0.35rem;">
-          <input type="checkbox" id="chkOffline" /> Offline Only (Skip Live Feeds)
-        </label>
-        <label style="font-size:0.84rem; color:var(--muted); display:flex; align-items:center; gap:0.35rem;">
-          <input type="checkbox" id="chkUseLlm" /> Use Local LLM (Ollama / AI Advisor)
-        </label>
+        <div class="toggles-group">
+          <label class="switch-label">
+            <input type="checkbox" id="chkOffline" />
+            <span>Offline Only (Skip Live Feeds)</span>
+          </label>
+          <label class="switch-label">
+            <input type="checkbox" id="chkUseLlm" />
+            <span>Use AI Advisor</span>
+          </label>
+        </div>
       </div>
     </div>
 
     <div class="feed-banner" id="feedBanner">Ready. Click "Run Reachability Proof" to evaluate targets.</div>
 
     <div class="kpi-grid">
-      <div class="kpi-card">
-        <div class="label">Total Host-CVE Proofs</div>
-        <div class="val" id="kpiTotal">0</div>
-      </div>
-      <div class="kpi-card">
-        <div class="label">Affected (Action Required)</div>
+      <div class="kpi-card kpi-danger clickable" id="kpiAffectedCard" data-kpi-filter="affected" title="Filter Affected verdicts">
+        <div class="kpi-top">
+          <div class="label">Affected (Action Required)</div>
+        </div>
         <div class="val danger" id="kpiAffected">0</div>
       </div>
-      <div class="kpi-card">
-        <div class="label">Not Affected (VEX Proven)</div>
+      <div class="kpi-card kpi-ok clickable" data-kpi-filter="not_affected" title="Filter Not Affected verdicts">
+        <div class="kpi-top">
+          <div class="label">Not Affected (VEX Proven)</div>
+        </div>
         <div class="val ok" id="kpiNotAffected">0</div>
       </div>
-      <div class="kpi-card">
-        <div class="label">Under Investigation</div>
-        <div class="val" id="kpiUnderInv" style="color:var(--warn);">0</div>
+      <div class="kpi-card kpi-warn clickable" data-kpi-filter="under_investigation" title="Filter Under Investigation verdicts">
+        <div class="kpi-top">
+          <div class="label">Under Investigation</div>
+        </div>
+        <div class="val warn" id="kpiUnderInv">0</div>
       </div>
-      <div class="kpi-card">
-        <div class="label">False-Positive Noise Cut</div>
+      <div class="kpi-card kpi-accent">
+        <div class="kpi-top">
+          <div class="label">False-Positive Noise Cut</div>
+        </div>
         <div class="val accent" id="kpiNoise">0%</div>
+        <div class="kpi-bar"><div class="kpi-bar-fill" id="noiseBar"></div></div>
+      </div>
+      <div class="kpi-card kpi-muted clickable" data-kpi-filter="all" title="Show all verdicts">
+        <div class="kpi-top">
+          <div class="label">Total Host-CVE Proofs</div>
+        </div>
+        <div class="val" id="kpiTotal">0</div>
       </div>
     </div>
 
     <div class="section-card">
       <div class="section-header">
-        <h2>Host Reachability Verdicts &amp; Deterministic Proofs</h2>
+        <div class="section-title-wrap">
+          <h2>Host Reachability Verdicts &amp; Deterministic Proofs</h2>
+          <span class="count-chip" id="rowCountChip">0 rows</span>
+        </div>
         <div class="filter-bar">
-          <select id="filterStatus" style="width:auto;">
+          <div class="seg-group" id="statusSegments" role="group" aria-label="Filter by verdict status">
+            <button type="button" class="seg-btn active" data-status="attention" title="Affected and under investigation">Needs Attention</button>
+            <button type="button" class="seg-btn" data-status="all">All</button>
+            <button type="button" class="seg-btn" data-status="affected">Affected</button>
+            <button type="button" class="seg-btn" data-status="not_affected">Not Affected</button>
+            <button type="button" class="seg-btn" data-status="under_investigation">Investigating</button>
+          </div>
+          <select id="filterStatus" class="sr-select" aria-label="Verdict status filter">
+            <option value="attention" selected>Needs Attention</option>
             <option value="all">All Verdicts</option>
             <option value="affected">Affected Only</option>
             <option value="not_affected">Not Affected Only</option>
             <option value="under_investigation">Under Investigation</option>
           </select>
-          <select id="filterOs" style="width:auto;">
+          <select id="filterOs" aria-label="OS family filter">
             <option value="all">All OS Families</option>
             <option value="linux">Linux</option>
             <option value="windows">Windows Server</option>
           </select>
-          <input type="text" id="filterSearch" placeholder="Filter host, CVE, proof..." style="width:220px;" />
+          <div class="search-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" id="filterSearch" placeholder="Filter host, CVE, proof..." />
+          </div>
         </div>
       </div>
 
+      <div class="table-scroll">
       <table>
         <thead>
           <tr>
@@ -874,11 +1381,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <tr><td colspan="6" style="color:var(--muted);">Loading initial evaluation...</td></tr>
         </tbody>
       </table>
+      </div>
     </div>
 
     <div class="section-card">
       <div class="section-header">
         <h2>Operational Risk &amp; Remediation Safety Briefing</h2>
+        <button type="button" class="ghost" id="btnCopyBriefing">Copy Briefing</button>
       </div>
       <pre class="briefing" id="briefingBox">Run an evaluation to view host-aware remediation guidance.</pre>
     </div>
@@ -914,6 +1423,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       URL.revokeObjectURL(url);
     }
 
+    function setStatusFilter(val) {
+      const sel = document.getElementById("filterStatus");
+      sel.value = val;
+      document.querySelectorAll("#statusSegments .seg-btn").forEach((b) => {
+        b.classList.toggle("active", b.getAttribute("data-status") === val);
+      });
+      renderVerdictRows();
+    }
+
+    document.querySelectorAll("#statusSegments .seg-btn").forEach((b) => {
+      b.addEventListener("click", () => setStatusFilter(b.getAttribute("data-status")));
+    });
+    document.querySelectorAll(".kpi-card[data-kpi-filter]").forEach((card) => {
+      card.addEventListener("click", () => setStatusFilter(card.getAttribute("data-kpi-filter")));
+    });
+
     document.getElementById("targetMode").addEventListener("change", (e) => {
       document.getElementById("customTargetField").style.display =
         e.target.value === "custom_target" ? "block" : "none";
@@ -932,10 +1457,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const data = await res.json();
         document.getElementById("verPill").textContent = "v" + (data.version || "1.0.0");
         const count = (data.docker_containers || []).length;
-        document.getElementById("dockerCountPill").textContent =
-          count > 0
-            ? "Discovered Docker Containers: " + count
-            : "Docker Containers: 0 (Demo Fleet ready)";
+        const dockerPill = document.getElementById("dockerCountPill");
+        dockerPill.innerHTML = count > 0
+          ? `<span class="status-dot ok"></span>Docker Targets: ${count}`
+          : `<span class="status-dot"></span>Docker: 0 (Demo Ready)`;
         if (count === 0 && !data.has_lab_inventory) {
           document.getElementById("targetMode").value = "demo_fleet";
         }
@@ -945,14 +1470,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
         const ai = data.ai_status || {};
         const aiPill = document.getElementById("aiStatusPill");
+        const llmToggle = document.getElementById("chkUseLlm");
+        const setupHint = "Set NOTAFFECTED_LLM_MODEL plus NOTAFFECTED_LLM_PROVIDER, NOTAFFECTED_LLM_URL or one provider API key to enable the AI advisor.";
+        if (llmToggle) {
+          llmToggle.disabled = !ai.configured;
+          llmToggle.closest("label").title = ai.configured ? "" : (ai.detail || "") + " " + setupHint;
+        }
         if (aiPill) {
-          const scope = ai.local_only ? "Local" : "External";
-          if (ai.online) {
-            aiPill.textContent = `AI: ${scope} ${ai.provider} Online (${ai.model})`;
-            aiPill.style.color = "var(--ok)";
-          } else {
-            aiPill.textContent = `AI: ${scope} ${ai.provider || "ollama"} Offline (Deterministic mode)`;
+          if (!ai.configured) {
+            aiPill.innerHTML = `<span class="status-dot"></span>AI: not configured`;
+            aiPill.title = [ai.provider ? ai.provider + ": " + (ai.detail || "") : (ai.detail || ""), setupHint].join(" ").trim();
             aiPill.style.color = "var(--muted)";
+          } else {
+            const scope = ai.local_only ? "local" : "external";
+            const unreachable = ai.online === false;
+            const checked = ai.online === true;  // null: configured, but nothing was sent to check it
+            aiPill.innerHTML = `<span class="status-dot ${unreachable ? "warn" : checked ? "ok" : ""}"></span>AI: ${esc(ai.provider)} · ${esc(ai.model)} (${scope}${unreachable ? ", unreachable" : ""})`;
+            aiPill.title = unreachable ? (ai.detail || "") : checked ? "" : "Configured; not contacted until the AI advisor runs.";
+            aiPill.style.color = unreachable ? "var(--warn)" : checked ? "var(--ok)" : "";
           }
         }
       } catch (err) {
@@ -962,8 +1497,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     function renderVerdictRows() {
       const tbody = document.getElementById("verdictsBody");
+      const chip = document.getElementById("rowCountChip");
       if (!latestResult || !latestResult.verdicts) {
-        tbody.innerHTML = '<tr><td colspan="6">No verdicts available.</td></tr>';
+        if (chip) chip.textContent = "0 rows";
+        tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);">No verdicts available.</td></tr>';
         return;
       }
       const specById = {};
@@ -974,25 +1511,38 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const osFilter = document.getElementById("filterOs").value;
       const q = (document.getElementById("filterSearch").value || "").toLowerCase();
 
-      const filtered = latestResult.verdicts.filter((v) => {
-        if (stFilter !== "all" && v.status !== stFilter) return false;
-        if (osFilter !== "all" && v.os_family !== osFilter) return false;
-        if (q) {
-          const blob = `${v.host} ${v.cve_id} ${v.reason} ${v.justification || ""}`.toLowerCase();
-          if (!blob.includes(q)) return false;
-        }
-        return true;
-      });
+      const statusRank = { affected: 0, under_investigation: 1, not_affected: 2 };
+      const filtered = latestResult.verdicts
+        .filter((v) => {
+          if (stFilter === "attention") {
+            if (v.status === "not_affected") return false;
+          } else if (stFilter !== "all" && v.status !== stFilter) {
+            return false;
+          }
+          if (osFilter !== "all" && v.os_family !== osFilter) return false;
+          if (q) {
+            const blob = `${v.host} ${v.cve_id} ${v.reason} ${v.justification || ""}`.toLowerCase();
+            if (!blob.includes(q)) return false;
+          }
+          return true;
+        })
+        .sort((a, b) => (statusRank[a.status] ?? 9) - (statusRank[b.status] ?? 9));
+
+      if (chip) chip.textContent = `${filtered.length} / ${latestResult.verdicts.length} rows`;
 
       if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);">No matching verdicts for current filter.</td></tr>';
+        const emptyMsg = stFilter === "attention" && !q && osFilter === "all"
+          ? "Nothing needs attention: every host-CVE pair is proven not affected."
+          : "No matching verdicts for current filter.";
+        tbody.innerHTML = `<tr><td colspan="6" style="color:var(--muted);">${esc(emptyMsg)}</td></tr>`;
         return;
       }
+      const statusLabel = { affected: "Affected", not_affected: "Not affected", under_investigation: "Under investigation" };
 
       tbody.innerHTML = filtered.map((v) => {
         const spec = specById[v.cve_id] || null;
         const justOrPatch = v.status === "not_affected"
-          ? `<code>${esc(v.justification || "not_affected")}</code>`
+          ? `<code class="just-code">${esc(v.justification || "not_affected")}</code>`
           : `Patch: <strong>${esc(v.patch ? v.patch.status : "unknown")}</strong>` +
             (v.patch && v.patch.fixed_version ? ` (<code>${esc(v.patch.fixed_version)}</code>)` : "");
         const mitigationsHtml = (v.status === "affected" && v.mitigation && v.mitigation.length > 0)
@@ -1006,16 +1556,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 low.startsWith("set-service ")
               );
               const runBtn = canRun
-                ? `<button type="button" class="mini primary" data-apply-host="${esc(v.host)}" data-apply-cve="${esc(v.cve_id)}" data-apply-idx="${idx}" data-apply-cmd="${esc(m)}">Run Mitigation</button>`
+                ? `<button type="button" class="mini caution" data-apply-host="${esc(v.host)}" data-apply-cve="${esc(v.cve_id)}" data-apply-idx="${idx}" data-apply-cmd="${esc(m)}" title="Changes the host (lab containers only)">Run Mitigation</button>`
                 : "";
               return `
                 <div class="mit-row">
                   <code class="mit-cmd">$ ${esc(m)}</code>
+                  <button type="button" class="mini primary" data-copy-cmd="${esc(m)}">Copy</button>
                   ${runBtn}
-                  <button type="button" class="mini" data-copy-cmd="${esc(m)}">Copy</button>
                 </div>
               `;
             }).join("")
+          : "";
+        const mitigationsBlock = mitigationsHtml
+          ? `
+            <details class="probe-drawer">
+              <summary>Temporary Mitigations (${v.mitigation.length})</summary>
+              ${mitigationsHtml}
+            </details>
+          `
           : "";
 
         const probes = v.probe_results || [];
@@ -1023,17 +1581,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (probes.length > 0) {
           probeListHtml = probes.map((pr, idx) => {
             const pSt = String(pr.status || "UNKNOWN");
+            const pLow = pSt.toLowerCase();
             const pColor = pSt === "NOT_MET" ? "var(--ok)" : (pSt === "MET" ? "var(--danger)" : "var(--warn)");
             const pName = pr.precondition ? pr.precondition.probe : "probe";
             const pDesc = pr.precondition ? pr.precondition.description : "";
             return `
-              <div style="margin-top:0.45rem; padding:0.45rem 0.65rem; background:var(--bg); border:1px solid var(--border); border-radius:6px; font-size:0.81rem;">
+              <div class="probe-item st-${esc(pLow)}">
                 <div>
                   <strong style="color:${pColor};">#${idx + 1} [${esc(pSt)}]</strong>
                   <code>${esc(pName)}</code> &mdash; <span style="color:var(--muted);">${esc(pDesc)}</span>
                 </div>
-                <div style="margin-top:0.2rem;">Command: <code>${esc(pr.command || "n/a")}</code></div>
-                <div style="margin-top:0.15rem; color:var(--muted);">Output: ${esc(pr.evidence || "")}</div>
+                <div style="margin-top:0.25rem; color:var(--text-soft);">Command: <code>${esc(pr.command || "n/a")}</code></div>
+                <div style="margin-top:0.18rem; color:var(--muted);">Output: ${esc(pr.evidence || "")}</div>
               </div>
             `;
           }).join("");
@@ -1051,27 +1610,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           ? `Rule source: ${esc(spec.source)} | Confidence: ${esc(spec.confidence)} | Severity: ${esc(spec.severity)}`
           : "";
         const inspectDrawer = `
-          <details style="margin-top:0.45rem;">
-            <summary style="cursor:pointer; font-size:0.8rem; color:var(--accent); user-select:none;">
+          <details class="probe-drawer">
+            <summary>
               Inspect Probes &amp; Commands (${probes.length} executed${specMeta ? " — " + specMeta : ""})
             </summary>
-            <div style="margin-top:0.35rem;">
-              ${spec ? `<div style="font-size:0.81rem; color:var(--text); margin-bottom:0.3rem;"><strong>Advisory:</strong> ${esc(spec.summary)}</div>` : ""}
+            <div style="margin-top:0.4rem;">
+              ${spec ? `<div style="font-size:0.81rem; color:var(--text-soft); margin-bottom:0.35rem;"><strong>Advisory:</strong> ${esc(spec.summary)}</div>` : ""}
               ${probeListHtml}
             </div>
           </details>
         `;
 
+        const rowClass = v.status === "affected" ? ' class="row-affected"' : "";
         return `
-          <tr>
+          <tr${rowClass}>
             <td><strong>${esc(v.host)}</strong></td>
             <td><span class="badge os">${esc(v.os_family)}</span></td>
-            <td><code>${esc(v.cve_id)}</code></td>
-            <td><span class="badge ${esc(v.status)}">${esc(v.status)}</span></td>
+            <td><code class="cve-code">${esc(v.cve_id)}</code></td>
+            <td><span class="badge ${esc(v.status)}">${esc(statusLabel[v.status] || v.status)}</span></td>
             <td>${justOrPatch}</td>
             <td>
               <div>${esc(v.reason)}</div>
-              ${mitigationsHtml}
+              ${mitigationsBlock}
               ${inspectDrawer}
             </td>
           </tr>
@@ -1081,6 +1641,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     async function runEvaluation() {
       const btn = document.getElementById("btnRun");
+      const origHtml = btn.innerHTML;
       btn.disabled = true;
       btn.textContent = "Probing targets...";
       document.getElementById("feedBanner").textContent = "Executing read-only system probes and live CVE checks...";
@@ -1116,9 +1677,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const s = latestResult.summary || {};
         document.getElementById("kpiTotal").textContent = s.total || 0;
         document.getElementById("kpiAffected").textContent = s.affected || 0;
+        document.getElementById("kpiAffectedCard").classList.toggle("kpi-hot", (s.affected || 0) > 0);
         document.getElementById("kpiNotAffected").textContent = s.not_affected || 0;
         document.getElementById("kpiUnderInv").textContent = s.under_investigation || 0;
-        document.getElementById("kpiNoise").textContent = (s.noise_reduction_pct || 0) + "%";
+        const noisePct = s.noise_reduction_pct || 0;
+        document.getElementById("kpiNoise").textContent = noisePct + "%";
+        const noiseBar = document.getElementById("noiseBar");
+        if (noiseBar) noiseBar.style.width = Math.max(0, Math.min(100, Number(noisePct))) + "%";
         document.getElementById("briefingBox").textContent = latestResult.briefing || "";
 
         const fm = latestResult.feed_meta || {};
@@ -1143,13 +1708,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById("feedBanner").textContent = "Error during evaluation: " + err;
       } finally {
         btn.disabled = false;
-        btn.textContent = "Run Reachability Proof";
+        btn.innerHTML = origHtml;
       }
     }
 
     document.getElementById("btnRun").addEventListener("click", runEvaluation);
     document.getElementById("btnResetLab").addEventListener("click", async () => {
       const btn = document.getElementById("btnResetLab");
+      const origHtml = btn.innerHTML;
       btn.disabled = true;
       btn.textContent = "Resetting...";
       try {
@@ -1165,12 +1731,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         window.alert("Error resetting lab: " + err);
       } finally {
         btn.disabled = false;
-        btn.textContent = "Reset Lab / Demo";
+        btn.innerHTML = origHtml;
       }
     });
-    document.getElementById("filterStatus").addEventListener("change", renderVerdictRows);
+    document.getElementById("filterStatus").addEventListener("change", (e) => setStatusFilter(e.target.value));
     document.getElementById("filterOs").addEventListener("change", renderVerdictRows);
     document.getElementById("filterSearch").addEventListener("input", renderVerdictRows);
+
+    document.getElementById("btnCopyBriefing").addEventListener("click", async (e) => {
+      const text = document.getElementById("briefingBox").textContent || "";
+      try {
+        await navigator.clipboard.writeText(text);
+        const btn = e.currentTarget;
+        const orig = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => { btn.textContent = orig; }, 1200);
+      } catch (err) {
+        console.error(err);
+      }
+    });
 
     document.getElementById("verdictsBody").addEventListener("click", async (e) => {
       const btn = e.target.closest("button");
