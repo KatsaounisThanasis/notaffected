@@ -91,6 +91,13 @@ def build_remediation_briefing(
             for note in caution_notes:
                 out_lines.append(f"   • Operational Safety Note: {note}")
         if v.mitigation:
-            out_lines.append(f"   • Recommended First Action: {v.mitigation[0]}")
+            first_action = v.mitigation[0]
+            if (
+                ("nginx" in search_text or ":443" in search_text or ":80" in search_text)
+                and "ufw default deny" in first_action.lower()
+                and len(v.mitigation) > 1
+            ):
+                first_action = v.mitigation[1]
+            out_lines.append(f"   • Recommended First Action: {first_action}")
 
     return "\n".join(out_lines)

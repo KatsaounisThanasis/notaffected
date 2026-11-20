@@ -215,11 +215,11 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
     pkg = str(pre.params.get("package") or "").strip()
     fixed_version = str(pre.params.get("fixed_version") or "").strip()
     release_fixes = pre.params.get("release_fixes")
-    if not pkg:
+    if not pkg or pkg.startswith("-"):
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.UNKNOWN,
-            evidence="Missing 'package' parameter in precondition",
+            evidence="Missing or invalid 'package' parameter in precondition",
             command="",
         )
 
@@ -336,11 +336,14 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
 
     if cmd_str.startswith("apk "):
         apk_cmp = runner.run(["apk", "version", "-t", installed_ver, fixed_version])
-        if (
-            not apk_cmp.transport_error
-            and apk_cmp.returncode == 0
-            and apk_cmp.stdout.strip() in ("<", "=", ">")
-        ):
+        if apk_cmp.transport_error:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=f"Transport error comparing Alpine versions for '{pkg_display}': {apk_cmp.stderr.strip()}",
+                command=cmd_str,
+            )
+        if apk_cmp.returncode == 0 and apk_cmp.stdout.strip() in ("<", "=", ">"):
             is_vuln = apk_cmp.stdout.strip() == "<"
         else:
             is_vuln = _fallback_version_lt(installed_ver, fixed_version)

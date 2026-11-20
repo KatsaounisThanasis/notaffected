@@ -314,7 +314,8 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
         explicit_report = isinstance(raw_report, (dict, str)) and bool(raw_report)
         try:
             if explicit_report:
-                findings = parse_scanner_json(raw_report)
+                parsed_report = json.loads(raw_report) if isinstance(raw_report, str) else raw_report
+                findings = parse_scanner_json(parsed_report)
             elif sample_path.is_file():
                 findings = parse_scanner_json(sample_path)
             else:
@@ -369,7 +370,9 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
     if not verdicts:
         briefing = feed_meta.get("error") or "No hosts or CVEs were evaluated."
     else:
-        briefing = build_remediation_briefing(specs, verdicts, use_llm=use_llm)
+        briefing = build_remediation_briefing(
+            specs, verdicts, use_llm=(use_llm and not offline)
+        )
     openvex_doc = build_openvex(verdicts)
     html_doc = build_html_report(specs, verdicts)
 
@@ -600,6 +603,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     table {
       width: 100%;
+      min-width: 980px;
       table-layout: fixed;
       border-collapse: collapse;
       font-size: 0.9rem;
@@ -612,12 +616,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       overflow-wrap: anywhere;
       word-break: break-word;
     }
-    th:nth-child(1), td:nth-child(1) { width: 12%; }
-    th:nth-child(2), td:nth-child(2) { width: 8%; }
-    th:nth-child(3), td:nth-child(3) { width: 11%; white-space: nowrap; }
-    th:nth-child(4), td:nth-child(4) { width: 12%; }
-    th:nth-child(5), td:nth-child(5) { width: 17%; }
-    th:nth-child(6), td:nth-child(6) { width: 40%; }
+    th:nth-child(1), td:nth-child(1) { width: 145px; }
+    th:nth-child(2), td:nth-child(2) { width: 96px; }
+    th:nth-child(3), td:nth-child(3) { width: 138px; white-space: nowrap; }
+    th:nth-child(4), td:nth-child(4) { width: 186px; }
+    th:nth-child(5), td:nth-child(5) { width: 18%; }
+    th:nth-child(6), td:nth-child(6) { width: auto; }
     th {
       color: var(--muted);
       font-size: 0.78rem;
@@ -877,7 +881,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         const res = await fetch("/api/targets");
         const data = await res.json();
-        document.getElementById("verPill").textContent = "v" + (data.version || "0.5.0");
+        document.getElementById("verPill").textContent = "v" + (data.version || "1.0.0");
         const count = (data.docker_containers || []).length;
         document.getElementById("dockerCountPill").textContent =
           count > 0

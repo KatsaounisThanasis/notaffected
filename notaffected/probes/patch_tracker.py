@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 from notaffected.model import CheckSpec, PatchInfo
+from notaffected.probes.primitives import _resolve_host_release_fix
 from notaffected.probes.runner import HostRunner
 
 
@@ -21,11 +22,13 @@ def resolve_host_patch_info(spec: CheckSpec, runner: HostRunner) -> PatchInfo:
     fixed_ver = (base_patch.fixed_version or "").strip()
 
     target_pkg: str | None = None
+    release_fixes: object = None
     for pre in spec.preconditions:
         if pre.probe == "package_installed_vulnerable":
             target_pkg = str(pre.params.get("package") or "").strip() or None
             if not fixed_ver and pre.params.get("fixed_version"):
                 fixed_ver = str(pre.params["fixed_version"]).strip()
+            release_fixes = pre.params.get("release_fixes")
             break
         if pre.probe == "kernel_version_vulnerable":
             target_pkg = "linux-image-generic"
@@ -35,6 +38,8 @@ def resolve_host_patch_info(spec: CheckSpec, runner: HostRunner) -> PatchInfo:
 
     if not target_pkg or not fixed_ver:
         return base_patch
+
+    fixed_ver = _resolve_host_release_fix(runner, release_fixes, "", fixed_ver)
 
     res = runner.run(["apt-cache", "policy", target_pkg])
     if res.transport_error or res.returncode != 0 or not res.stdout.strip():

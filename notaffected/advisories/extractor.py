@@ -443,7 +443,11 @@ def extract_from_osv_payload(
             if ref_snippets:
                 enriched_text = f"{full_text}\n\n{ref_snippets}"
         llm_pres, llm_mitigations, llm_os = _extract_via_llm(
-            cve_id, enriched_text, os_family=os_family, is_kernel=is_kernel
+            cve_id,
+            enriched_text,
+            os_family=os_family,
+            is_kernel=is_kernel,
+            os_locked=bool(is_windows or is_kernel or pkg_name),
         )
         if llm_os in ("linux", "windows") and not is_kernel and not pkg_name:
             os_family = llm_os
@@ -725,15 +729,45 @@ def _is_grounded_llm_precondition(
     return True
 
 
+_SAFE_LLM_MITIGATION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^sudo\s+systemctl\s+(?:disable\s+--now|stop)\s+[a-zA-Z0-9_.@-]+$"),
+    re.compile(r"^sudo\s+modprobe\s+-r\s+[a-zA-Z0-9_-]+$"),
+    re.compile(r"^sudo\s+ufw\s+deny\s+\d{1,5}/(?:tcp|udp)$"),
+    re.compile(r"^sudo\s+sysctl\s+-w\s+[a-zA-Z0-9_.-]+=[a-zA-Z0-9_.-]+$"),
+    re.compile(r"^Stop-Service\s+-Name\s+[a-zA-Z0-9_.-]+\s+-Force$", re.IGNORECASE),
+    re.compile(
+        r"^Stop-Service\s+-Name\s+[a-zA-Z0-9_.-]+\s+-Force;\s*Set-Service\s+-Name\s+[a-zA-Z0-9_.-]+\s+-StartupType\s+Disabled$",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _is_safe_llm_mitigation(cmd: str, is_kernel: bool) -> bool:
+    """Strictly allowlist safe single-command mitigations from LLM output (blocks rm -rf, redirects, etc.)."""
+    cleaned = cmd.strip()
+    if not cleaned or any(tok in cleaned for tok in ("\n", "\r", "`", "$(", ">", "<", "|", "&&")):
+        return False
+    if not any(pat.fullmatch(cleaned) for pat in _SAFE_LLM_MITIGATION_PATTERNS):
+        return False
+    low = cleaned.lower()
+    if low.startswith("sudo modprobe -r "):
+        mod = low.removeprefix("sudo modprobe -r ").strip().replace("-", "_")
+        return is_kernel and mod in KNOWN_KERNEL_MODULES
+    if any(f"{nd}.service" in low for nd in _NON_DAEMON_PACKAGES):
+        return False
+    return True
+
+
 def _extract_via_llm(
     cve_id: str,
     advisory_text: str,
     os_family: str = "linux",
     is_kernel: bool = False,
+    os_locked: bool = False,
 ) -> tuple[list[Precondition], list[str], str]:
     """Ask the local/configured LLM to map advisory prose into closed PROBE_TYPES.
     Drops any unrecognized probe type, cross-OS probe, hallucinated module/service,
-    missing required parameter, or malformed entry.
+    missing required parameter, or unsafe mitigation command.
     """
     allowed_set = WINDOWS_ALLOWED_PROBES if os_family == "windows" else LINUX_ALLOWED_PROBES
     if not is_kernel:
@@ -773,10 +807,12 @@ def _extract_via_llm(
     if not resp:
         return [], [], os_family
 
-    detected_os = str(resp.get("os_family") or os_family).strip().lower()
+    detected_os = os_family if os_locked else str(resp.get("os_family") or os_family).strip().lower()
     if detected_os not in ("linux", "windows"):
         detected_os = os_family
     effective_allowed = WINDOWS_ALLOWED_PROBES if detected_os == "windows" else LINUX_ALLOWED_PROBES
+    if not is_kernel:
+        effective_allowed = effective_allowed - {"kernel_module_loaded", "kernel_version_vulnerable"}
     valid_justifications = {j.value for j in VexJustification}
     adv_lower = advisory_text.lower()
 
@@ -809,12 +845,6 @@ def _extract_via_llm(
     for m in resp.get("mitigation") or []:
         if not isinstance(m, str) or not m.strip():
             continue
-        m_low = m.strip().lower()
-        if not is_kernel and ("rmmod " in m_low or "modprobe " in m_low):
-            continue
-        if any(f"{nd}.service" in m_low for nd in _NON_DAEMON_PACKAGES):
-            continue
-        if "/etc/curlrc" in m_low or "/etc/runc/" in m_low:
-            continue
-        mitigations.append(m.strip())
+        if _is_safe_llm_mitigation(m, is_kernel=is_kernel):
+            mitigations.append(m.strip())
     return valid_preconditions, mitigations, detected_os

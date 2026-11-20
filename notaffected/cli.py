@@ -31,8 +31,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="notaffected",
         description=(
-            "Deterministically prove whether CVEs actually affect your Linux hosts "
-            "and emit OpenVEX v0.2.0."
+            "Deterministically prove whether CVEs actually affect your Linux & Windows Server "
+            "hosts, Docker containers, or Kubernetes pods and emit OpenVEX v0.2.0."
         ),
     )
     parser.add_argument(
@@ -45,7 +45,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # `notaffected check`
     p_check = sub.add_parser(
         "check",
-        help="Check one or more CVE IDs against local or SSH hosts",
+        help="Check one or more CVE IDs against local, SSH, Docker, or Kubernetes targets",
     )
     p_check.add_argument("cves", nargs="+", help="CVE ID(s) to evaluate (e.g. CVE-2026-98432)")
     _add_target_and_output_args(p_check)
@@ -176,7 +176,7 @@ def _add_target_and_output_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--demo-fleet",
         action="store_true",
-        help="Run against a built-in 3-host simulated fleet (laptop, exposed server, patched DB)",
+        help="Run against a built-in 5-host mixed Linux + Windows Server simulated fleet",
     )
     p.add_argument(
         "--emit-vex",

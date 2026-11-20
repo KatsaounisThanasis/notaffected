@@ -297,6 +297,8 @@ def get_ai_status(timeout: float = 0.6) -> dict[str, Any]:
             or "http://127.0.0.1:11434/api/generate"
         )
         parsed = urllib.parse.urlparse(base_url)
+        ollama_host = (parsed.hostname or "127.0.0.1").lower()
+        is_local = ollama_host in ("127.0.0.1", "localhost", "::1")
         tags_url = f"{parsed.scheme or 'http'}://{parsed.netloc or '127.0.0.1:11434'}/api/tags"
         online = False
         available_models: list[str] = []
@@ -314,7 +316,7 @@ def get_ai_status(timeout: float = 0.6) -> dict[str, Any]:
             "provider": "ollama",
             "model": chosen,
             "online": online,
-            "local_only": True,
+            "local_only": is_local,
             "available_models": available_models,
         }
     if provider == "claude-cli":

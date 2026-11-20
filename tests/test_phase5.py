@@ -587,6 +587,54 @@ def test_llm_hallucination_grounding_guards() -> None:
     )
 
 
+def test_final_qa_security_and_invariant_fixes() -> None:
+    from notaffected.advisories.extractor import _is_safe_llm_mitigation
+    from notaffected.advisories.fetcher import _is_safe_public_https_url
+    from notaffected.model import Precondition, ProbeStatus
+    from notaffected.probes.primitives import run_probe
+
+    # 1. Strict LLM mitigation allowlist blocks prompt injection
+    assert not _is_safe_llm_mitigation("sudo rm -rf /", is_kernel=False)
+    assert not _is_safe_llm_mitigation("echo pwned > /etc/passwd", is_kernel=False)
+    assert not _is_safe_llm_mitigation("sudo modprobe -r curl", is_kernel=False)
+    assert _is_safe_llm_mitigation("sudo modprobe -r nf_tables", is_kernel=True)
+    assert _is_safe_llm_mitigation("Stop-Service -Name MSMQ -Force", is_kernel=False)
+
+    # 2. SSRF URL guard blocks alternate IP encodings and .internal metadata hosts
+    assert not _is_safe_public_https_url("https://0x7f000001/")
+    assert not _is_safe_public_https_url("https://2130706433/")
+    assert not _is_safe_public_https_url("https://127.1/")
+    assert not _is_safe_public_https_url("https://metadata.google.internal/")
+
+    # 3. apk version -t transport error returns UNKNOWN (never NOT_MET)
+    alpine_err = MockRunner(
+        host_name="alpine-err",
+        responses={
+            ("apk", "info", "-e", "-v", "busybox"): CommandResult(0, "busybox-1.36.1-r29\n", ""),
+            ("apk", "version", "-t", "1.36.1-r29", "0.0.1-r0"): CommandResult(
+                255, "", "connection reset", transport_error=True
+            ),
+        },
+    )
+    res_err = run_probe(
+        Precondition("package_installed_vulnerable", {"package": "busybox", "fixed_version": "0.0.1-r0"}, "bb"),
+        alpine_err,
+    )
+    assert res_err.status == ProbeStatus.UNKNOWN
+
+    # 4. Web API scanner_json rejects local file paths as string payload
+    res_path = evaluate_dashboard_request(
+        {
+            "target_mode": "demo_fleet",
+            "scan_mode": "scanner_json",
+            "scanner_report": "examples/trivy-scan.json",
+            "offline": True,
+        }
+    )
+    assert "Invalid scanner JSON report" in res_path["feed_meta"].get("error", "")
+
+
+
 
 
 

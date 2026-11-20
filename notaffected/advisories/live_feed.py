@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from notaffected import __version__
 from notaffected.advisories.builtin_specs import BUILTIN_SPECS
 from notaffected.advisories.extractor import extract_from_osv_payload, resolve_check_spec
 from notaffected.advisories.fetcher import DEFAULT_CACHE_DIR
@@ -81,7 +82,7 @@ def fetch_cisa_kev_cves(
                 CISA_KEV_URL,
                 headers={
                     "Accept": "application/json",
-                    "User-Agent": "notaffected/0.5 (+https://openvex.dev)",
+                    "User-Agent": f"notaffected/{__version__} (+https://openvex.dev)",
                 },
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:

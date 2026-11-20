@@ -6,11 +6,14 @@ import concurrent.futures
 import ipaddress
 import json
 import re
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+from notaffected import __version__
 
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "notaffected" / "osv"
 _SAFE_ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{2,63}$")
@@ -200,20 +203,43 @@ def strip_html_to_text(raw_html: str) -> str:
 
 
 def _is_safe_public_https_url(url: str) -> bool:
-    """Ensure reference URL uses https:// and does not point to localhost or private IPs."""
+    """Ensure reference URL uses https:// and does not point to localhost or private/non-global IPs."""
     if not url.startswith("https://"):
         return False
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").strip().lower()
-    if not host or host in ("localhost", "localhost.localdomain") or host.endswith(".local"):
+    if (
+        not host
+        or host in ("localhost", "localhost.localdomain")
+        or host.endswith((".local", ".internal"))
+    ):
+        return False
+    if re.fullmatch(r"(?:0x[0-9a-f]+|\d+(?:\.\d+){0,2})", host):
         return False
     try:
         ip = ipaddress.ip_address(host)
-        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
-            return False
+        return ip.is_global
     except ValueError:
         pass
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        for info in infos:
+            addr = info[4][0]
+            ip_obj = ipaddress.ip_address(addr)
+            if not ip_obj.is_global:
+                return False
+    except OSError:
+        pass
     return True
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-validate every HTTP redirect target against _is_safe_public_https_url."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        if not _is_safe_public_https_url(str(newurl)):
+            raise urllib.error.URLError(f"Blocked unsafe redirect target: {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def fetch_reference_snippets(
@@ -240,14 +266,15 @@ def fetch_reference_snippets(
         ):
             candidate_urls.append(url)
 
+    opener = urllib.request.build_opener(_SafeRedirectHandler)
     snippets: list[str] = []
     for url in candidate_urls[:max_urls]:
         try:
             req = urllib.request.Request(
                 url,
-                headers={"User-Agent": "notaffected/0.3 (+https://openvex.dev)"},
+                headers={"User-Agent": f"notaffected/{__version__} (+https://openvex.dev)"},
             )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with opener.open(req, timeout=timeout) as resp:
                 raw_bytes = resp.read(65536)
             text = raw_bytes.decode("utf-8", errors="ignore")
             cleaned = strip_html_to_text(text)
