@@ -22,10 +22,11 @@ def build_remediation_briefing(
     if not actionable:
         return "All evaluated hosts are deterministically NOT AFFECTED. No remediation actions required."
 
-    # Prioritize confirmed AFFECTED findings and keep prompt compact for fast local CPU models
+    # Prioritize confirmed AFFECTED findings. The budget does not depend on the provider: the
+    # user picks the model, so its size and speed are not ours to assume.
     provider = detect_provider()
-    max_items = 3 if provider == "ollama" else 8
-    max_toks = 180 if provider == "ollama" else 512
+    max_items = 8
+    max_toks = 512
     llm_items = actionable[:max_items]
     spec_map = {s.cve_id: s for s in specs}
     findings_lines: list[str] = []
@@ -49,7 +50,7 @@ def build_remediation_briefing(
         llm_reply = generate(prompt, timeout=90, json_format=False, max_tokens=max_toks).strip()
         if llm_reply:
             st = get_ai_status()
-            model_name = st.get("model") or "default"
+            model_name = st.get("model") or "unknown"
             extra_note = (
                 f"\n(Showing AI triage for top {len(llm_items)} of {len(actionable)} actionable findings)"
                 if len(actionable) > len(llm_items)
@@ -59,7 +60,7 @@ def build_remediation_briefing(
 
     # Deterministic host-aware operational triage when no LLM is reachable
     out_lines: list[str] = [
-        "Structured Operational Triage (deterministic fallback — start local `ollama serve` or set NOTAFFECTED_LLM_PROVIDER):"
+        "Structured Operational Triage (deterministic; AI advisor not configured or unavailable):"
     ]
     for idx, v in enumerate(actionable, start=1):
         patch_status = v.patch.status if v.patch else "unknown"

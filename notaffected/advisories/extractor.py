@@ -16,7 +16,7 @@ from notaffected.advisories.fetcher import (
     fetch_reference_snippets,
     fetch_ubuntu_osv_advisory,
 )
-from notaffected.local_model import generate_json
+from notaffected.local_model import generate_json, llm_configured
 from notaffected.model import (
     PROBE_TYPES,
     CheckSpec,
@@ -498,7 +498,8 @@ def extract_from_osv_payload(
     source = "osv"
     if use_llm:
         enriched_text = full_text
-        if len(details) < 300:
+        # extra reference text only feeds the model: no model configured, nothing fetched
+        if len(details) < 300 and llm_configured():
             ref_snippets = fetch_reference_snippets(osv_data)
             if ref_snippets:
                 enriched_text = f"{full_text}\n\n{ref_snippets}"

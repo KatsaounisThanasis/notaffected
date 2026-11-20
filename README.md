@@ -13,7 +13,7 @@ Every week dozens of new CVEs are published, and AI-assisted research is finding
 
 `notaffected` bridges the gap between security advisories and the real runtime state of your Linux and Windows Server hosts, containers, and Kubernetes pods:
 
-1. **Extracts attack preconditions** from advisories (built-in golden specs for Linux & Windows, OSV.dev / Ubuntu OSV records, kernel commit paths, and optional schema-validated multi-provider LLM extraction via Gemini, Claude, OpenAI, or Ollama).
+1. **Extracts attack preconditions** from advisories (built-in golden specs for Linux & Windows, OSV.dev / Ubuntu OSV records, kernel commit paths, and optional schema-validated LLM extraction with any provider and model you configure, local or hosted).
 2. **Runs deterministic, read-only probes** on your targets (local host, Linux/Windows SSH fleet, Docker containers, or Kubernetes pods). **AI never decides the verdict and never runs shell commands**: the optional LLM may only propose parameters for the closed probe set, each one must be named in the advisory, it never sets the OS family or the VEX justification, and a `NOT_MET` from an LLM-proposed or keyword-heuristic check never yields `not_affected` on its own. `not_affected` needs a `NOT_MET` from a curated or structured-data check (or a probe-confirmed OS mismatch); every check that cannot compare, see or confirm something resolves to `under_investigation`.
 3. **Delivers actionable output:**
    - The short list of hosts that are **truly affected**, the exact temporary mitigation commands (`ufw`, `sysctl`, `modprobe -r`, `systemctl`, or PowerShell `Set-ItemProperty` / `Stop-Service`) to run right now, live APT patch status on Linux (`apt-cache policy`; Windows KB status comes from the built-in spec, not a live query), and an optional **AI Operational Risk & Remediation Briefing** (`--ai-explain`).
@@ -122,8 +122,19 @@ notaffected scan -i lab/inventory.yaml
 ./lab/teardown_lab.sh
 ```
 
-### 7. Optional Local-First AI Configuration
-By default, `--llm` and `--ai-explain` target **local Ollama (`127.0.0.1:11434`)** so zero data leaves your machine unless an external provider (`NOTAFFECTED_LLM_PROVIDER=claude-cli|agy-cli|gemini|anthropic|openai`) or API key is explicitly configured.
+### 7. Optional AI Advisor (bring your own model)
+The AI advisor is off until you configure it: with nothing set, `--llm` and `--ai-explain` fall back to deterministic output and nothing is sent to any model. Pick any provider and model you prefer, local or hosted:
+
+| Provider | Set | Model |
+|---|---|---|
+| Any OpenAI-compatible server (vLLM, LM Studio, llama.cpp, LiteLLM, ...) | `NOTAFFECTED_LLM_URL=http://host:port/v1/chat/completions` (+ `NOTAFFECTED_LLM_API_KEY` if it needs one; `OPENAI_API_KEY` is never sent to it) | `NOTAFFECTED_LLM_MODEL` |
+| Ollama | `NOTAFFECTED_LLM_PROVIDER=ollama` (or `NOTAFFECTED_LLM_URL=http://host:11434/api/generate`) | `NOTAFFECTED_LLM_MODEL` |
+| OpenAI | `OPENAI_API_KEY` | `NOTAFFECTED_LLM_MODEL` |
+| Anthropic | `ANTHROPIC_API_KEY` | `NOTAFFECTED_LLM_MODEL` |
+| Google Gemini | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | `NOTAFFECTED_LLM_MODEL` |
+| `claude` / `agy` CLI | `NOTAFFECTED_LLM_PROVIDER=claude-cli` or `agy-cli` | the CLI's default, or `NOTAFFECTED_LLM_MODEL` |
+
+`NOTAFFECTED_LLM_PROVIDER` overrides auto-detection; an unknown value turns the advisor off instead of guessing. Without it, a key picks the provider only when keys for exactly one provider are set. There is no built-in default model, so a key alone does not start sending advisory text anywhere. The dashboard shows the provider, the model and whether the endpoint is on this machine ("local", even if it is a proxy that forwards to a hosted API) or external, or "AI: not configured" with the reason. Whatever the model, it only proposes probe parameters: verdicts stay deterministic.
 
 ---
 

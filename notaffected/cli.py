@@ -68,7 +68,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_spec.add_argument(
         "--llm",
         action="store_true",
-        help="Use configured local/OpenAI-compatible LLM to extract preconditions from prose",
+        help="Use the AI provider you configured (NOTAFFECTED_LLM_*) to extract preconditions from prose",
     )
 
     # `notaffected scan`
@@ -207,7 +207,7 @@ def _add_target_and_output_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--llm",
         action="store_true",
-        help="Allow optional local/configured LLM to extract preconditions for unknown CVEs",
+        help="Use the AI provider you configured (NOTAFFECTED_LLM_*) to extract preconditions for unknown CVEs",
     )
     p.add_argument(
         "--ai-explain",

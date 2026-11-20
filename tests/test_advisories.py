@@ -1,5 +1,7 @@
 """Tests for built-in golden specs, OSV fetcher, and schema-validated extractor (Task 4)."""
 
+import pytest
+
 from notaffected.advisories.builtin_specs import BUILTIN_SPECS
 from notaffected.advisories.extractor import extract_from_osv_payload, resolve_check_spec
 from notaffected.model import PROBE_TYPES
@@ -286,22 +288,16 @@ def test_windows_advisory_heuristics_and_multi_provider_llm(monkeypatch):
     assert "windows_service_active" in win_probes
     assert win_spec.confidence == "high"
 
-    # Verify provider detection for Gemini and Anthropic
-    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("NOTAFFECTED_LLM_URL", raising=False)
+    # Verify provider detection for Gemini and Anthropic (independent of the caller's shell)
+    _llm_env(monkeypatch, GEMINI_API_KEY="test-gemini-key")
     assert local_model.detect_provider() == "gemini"
 
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    _llm_env(monkeypatch, ANTHROPIC_API_KEY="test-anthropic-key")
     assert local_model.detect_provider() == "anthropic"
 
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("NOTAFFECTED_LLM_API_KEY", raising=False)
-    monkeypatch.delenv("NOTAFFECTED_LLM_PROVIDER", raising=False)
-    # Default must be strictly local 'ollama' so nothing leaves the machine implicitly
-    assert local_model.detect_provider() == "ollama"
+    # No provider is assumed: with nothing configured nothing is contacted
+    _llm_env(monkeypatch)
+    assert local_model.detect_provider() is None
 
     # Verify AI remediation briefing works both with LLM and deterministic fallback
     fleet = load_demo_fleet()
@@ -529,3 +525,309 @@ def test_windows_kb_from_prose_never_overrides_the_mitre_build():
     build = next(p for p in spec.preconditions if p.probe == "windows_build_vulnerable")
     assert "kb" not in build.params and build.params["fixed_build"] == "20348.2700"
     assert build.origin == "osv"
+
+
+# --- AI provider: bring your own, nothing assumed -------------------------------------------
+
+_LLM_ENV = (
+    "NOTAFFECTED_LLM_PROVIDER",
+    "NOTAFFECTED_LLM_URL",
+    "NOTAFFECTED_OLLAMA_URL",
+    "NOTAFFECTED_LLM_MODEL",
+    "NOTAFFECTED_LLM_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+)
+
+
+def _llm_env(monkeypatch, **values):
+    for name in _LLM_ENV:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+
+def _record_calls(monkeypatch):
+    """Record every outbound request or CLI spawn instead of making it.
+
+    A recorder, not an assertion: generate() swallows exceptions, so a raised AssertionError
+    would be lost and the test would pass for the wrong reason.
+    """
+    from notaffected import local_model
+
+    calls: list[tuple] = []
+
+    def _record(*args, **_kwargs):
+        calls.append(args)
+        raise OSError("blocked in test")
+
+    monkeypatch.setattr(local_model.urllib.request, "urlopen", _record)
+    monkeypatch.setattr(local_model.subprocess, "run", _record)
+    return calls
+
+
+def test_nothing_configured_means_deterministic_only_and_nothing_is_contacted(monkeypatch):
+    from notaffected import local_model
+    from notaffected.advisories.ai_advisor import build_remediation_briefing
+    from notaffected.engine.evaluator import evaluate_fleet
+    from notaffected.inventory import load_demo_fleet
+
+    _llm_env(monkeypatch)
+    calls = _record_calls(monkeypatch)
+
+    assert local_model.detect_provider() is None
+    assert local_model.generate("hello") == ""
+    status = local_model.get_ai_status()
+    assert status["provider"] is None and status["configured"] is False
+    assert status["local_only"] is True
+
+    specs = [BUILTIN_SPECS["CVE-2026-98432"]]
+    brief = build_remediation_briefing(specs, evaluate_fleet(specs, load_demo_fleet()))
+    assert brief.startswith("Structured Operational Triage (deterministic;")
+    assert "ollama" not in brief.lower()
+    assert calls == []
+
+
+def test_a_key_alone_sends_nothing_without_a_model_the_user_chose(monkeypatch):
+    from notaffected import local_model
+
+    _llm_env(monkeypatch, OPENAI_API_KEY="sk-test")
+    calls = _record_calls(monkeypatch)
+
+    assert local_model.detect_provider() == "openai"
+    assert local_model.resolve_model("openai") is None
+    assert local_model.generate("hello") == ""
+    status = local_model.get_ai_status()
+    assert status["configured"] is False
+    assert status["detail"] == "NOTAFFECTED_LLM_MODEL is not set"
+    assert calls == []
+
+
+def test_hosted_provider_chosen_without_its_key_sends_nothing(monkeypatch):
+    from notaffected import local_model
+
+    for provider, key_name in (("gemini", "GEMINI_API_KEY"), ("anthropic", "ANTHROPIC_API_KEY")):
+        _llm_env(monkeypatch, NOTAFFECTED_LLM_PROVIDER=provider, NOTAFFECTED_LLM_MODEL="their-model")
+        calls = _record_calls(monkeypatch)
+        assert local_model.generate("host web-01 evidence") == "", provider
+        assert calls == [], provider  # the prompt never left the machine
+        status = local_model.get_ai_status()
+        assert status["configured"] is False and key_name in status["detail"], provider
+
+
+def test_own_openai_compatible_server_gets_the_users_model_verbatim(monkeypatch):
+    import io
+    import json
+
+    from notaffected import local_model
+
+    url = "http://127.0.0.1:8000/v1/chat/completions"
+    _llm_env(
+        monkeypatch,
+        NOTAFFECTED_LLM_URL=url,
+        NOTAFFECTED_LLM_MODEL="my-finetune-70b",
+        OPENAI_API_KEY="sk-ambient-for-other-tools",
+    )
+    sent: list = []
+
+    def _fake_urlopen(req, timeout=None):
+        sent.append(req)
+        return io.BytesIO(json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode())
+
+    monkeypatch.setattr(local_model.urllib.request, "urlopen", _fake_urlopen)
+
+    assert local_model.detect_provider() == "openai"
+    assert local_model.generate("hello") == "ok"
+    (req,) = sent
+    assert req.full_url == url
+    assert json.loads(req.data)["model"] == "my-finetune-70b"
+    assert "Authorization" not in req.headers  # the shell's OpenAI key never goes to their server
+
+    sent.clear()
+    monkeypatch.setenv("NOTAFFECTED_LLM_API_KEY", "their-server-key")
+    assert local_model.generate("hello") == "ok"
+    assert sent[0].headers["Authorization"] == "Bearer their-server-key"
+    monkeypatch.delenv("NOTAFFECTED_LLM_API_KEY")
+
+    status = local_model.get_ai_status()
+    assert status["configured"] is True and status["local_only"] is True
+    assert status["model"] == "my-finetune-70b"
+
+
+def test_ollama_is_only_used_when_pointed_at_and_reports_when_it_is_down(monkeypatch):
+    from notaffected import local_model
+
+    _llm_env(
+        monkeypatch,
+        NOTAFFECTED_LLM_URL="http://localhost:11434/api/generate",
+        NOTAFFECTED_LLM_MODEL="their-local-model",
+    )
+    calls = _record_calls(monkeypatch)
+
+    assert local_model.detect_provider() == "ollama"
+    status = local_model.get_ai_status()
+    assert status["configured"] is True and status["online"] is False
+    assert status["local_only"] is True
+    assert status["detail"] == "no answer from localhost:11434"
+    assert len(calls) == 1  # the local /api/tags probe, nothing else
+
+
+def test_cli_providers_use_their_own_default_model_unless_one_is_set(monkeypatch):
+    from notaffected import local_model
+
+    seen: list[list[str]] = []
+
+    def _fake_run(cmd, **_k):
+        seen.append(list(cmd))
+        return type("P", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    monkeypatch.setattr(local_model.subprocess, "run", _fake_run)
+    monkeypatch.setattr(local_model.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    _llm_env(monkeypatch, NOTAFFECTED_LLM_PROVIDER="agy-cli")
+    assert local_model.generate("hello") == "ok"
+    assert "--model" not in seen[-1] and "--sandbox" in seen[-1]
+    status = local_model.get_ai_status()
+    assert status["configured"] is True and status["model"] == "CLI default"
+    assert status["online"] is True
+
+    _llm_env(monkeypatch, NOTAFFECTED_LLM_PROVIDER="claude-cli", NOTAFFECTED_LLM_MODEL="their-model")
+    assert local_model.generate("hello") == "ok"
+    cmd = seen[-1]
+    assert cmd[0] == "claude" and cmd[cmd.index("--model") + 1] == "their-model"
+
+
+def test_legacy_ollama_url_with_an_openai_path_goes_where_it_points(monkeypatch):
+    from notaffected import local_model
+
+    url = "http://localhost:11434/v1/chat/completions"
+    _llm_env(
+        monkeypatch,
+        NOTAFFECTED_OLLAMA_URL=url,
+        NOTAFFECTED_LLM_MODEL="their-model",
+        OPENAI_API_KEY="sk-ambient-for-other-tools",
+    )
+    calls = _record_calls(monkeypatch)
+
+    assert local_model.detect_provider() == "openai"
+    local_model.generate("hello")
+    (req,) = (c[0] for c in calls)
+    assert req.full_url == url  # not api.openai.com
+    assert "Authorization" not in req.headers
+    assert local_model.get_ai_status()["local_only"] is True
+
+
+def test_unknown_provider_turns_the_advisor_off_instead_of_guessing(monkeypatch):
+    from notaffected import local_model
+
+    _llm_env(
+        monkeypatch,
+        NOTAFFECTED_LLM_PROVIDER="claude",  # meant claude-cli
+        ANTHROPIC_API_KEY="sk-ambient",
+        NOTAFFECTED_LLM_MODEL="their-model",
+    )
+    calls = _record_calls(monkeypatch)
+
+    assert local_model.detect_provider() is None
+    assert local_model.generate("hello") == ""
+    assert calls == []
+    assert "unknown NOTAFFECTED_LLM_PROVIDER 'claude'" in local_model.get_ai_status()["detail"]
+
+
+def test_keys_for_several_providers_need_an_explicit_choice(monkeypatch):
+    from notaffected import local_model
+
+    _llm_env(monkeypatch, GOOGLE_API_KEY="g", OPENAI_API_KEY="sk", NOTAFFECTED_LLM_MODEL="m")
+    calls = _record_calls(monkeypatch)
+
+    assert local_model.detect_provider() is None
+    assert local_model.generate("hello") == ""
+    assert calls == []
+    detail = local_model.get_ai_status()["detail"]
+    assert "(gemini, openai)" in detail and "NOTAFFECTED_LLM_PROVIDER" in detail
+
+    monkeypatch.setenv("NOTAFFECTED_LLM_PROVIDER", "openai")
+    assert local_model.detect_provider() == "openai"
+
+
+def test_llm_mode_fetches_reference_pages_only_when_a_model_will_read_them(monkeypatch):
+    fetched: list = []
+    monkeypatch.setattr(
+        "notaffected.advisories.extractor.fetch_reference_snippets",
+        lambda osv: fetched.append(osv["id"]) or "",
+    )
+    _stub_llm(monkeypatch, {})
+    osv = {
+        "id": "CVE-2025-0003",
+        "summary": "nginx resolver bug",
+        "details": "short",
+        "affected": [],
+        "references": [{"url": "https://example.org/advisory"}],
+    }
+
+    _llm_env(monkeypatch)
+    extract_from_osv_payload("CVE-2025-0003", osv, use_llm=True)
+    assert fetched == []
+
+    _llm_env(monkeypatch, NOTAFFECTED_LLM_PROVIDER="claude-cli")
+    extract_from_osv_payload("CVE-2025-0003", osv, use_llm=True)
+    assert fetched == ["CVE-2025-0003"]
+
+
+_CONFIG_CASES = {
+    "nothing": {},
+    "ambient key, no model": {"OPENAI_API_KEY": "sk"},
+    "openai key and model": {"OPENAI_API_KEY": "sk", "NOTAFFECTED_LLM_MODEL": "m"},
+    "anthropic key and model": {"ANTHROPIC_API_KEY": "k", "NOTAFFECTED_LLM_MODEL": "m"},
+    "gemini chosen, no key": {"NOTAFFECTED_LLM_PROVIDER": "gemini", "NOTAFFECTED_LLM_MODEL": "m"},
+    "own server and model": {
+        "NOTAFFECTED_LLM_URL": "http://10.0.0.5:8000/v1/chat/completions",
+        "NOTAFFECTED_LLM_MODEL": "m",
+    },
+    "own server without scheme": {
+        "NOTAFFECTED_LLM_URL": "localhost:8000/v1/chat/completions",
+        "NOTAFFECTED_LLM_MODEL": "m",
+    },
+    "api.openai.com url, no key": {
+        "NOTAFFECTED_LLM_PROVIDER": "openai",
+        "NOTAFFECTED_LLM_URL": "https://api.openai.com/v1/chat/completions",
+        "NOTAFFECTED_LLM_MODEL": "m",
+    },
+    "api.openai.com url, key": {
+        "NOTAFFECTED_LLM_URL": "https://api.openai.com/v1/chat/completions",
+        "OPENAI_API_KEY": "sk",
+        "NOTAFFECTED_LLM_MODEL": "m",
+    },
+    "ollama chosen and model": {"NOTAFFECTED_LLM_PROVIDER": "ollama", "NOTAFFECTED_LLM_MODEL": "m"},
+    "unknown provider, ambient key": {
+        "NOTAFFECTED_LLM_PROVIDER": "claude",
+        "ANTHROPIC_API_KEY": "k",
+        "NOTAFFECTED_LLM_MODEL": "m",
+    },
+    "several keys and model": {"GOOGLE_API_KEY": "g", "OPENAI_API_KEY": "sk", "NOTAFFECTED_LLM_MODEL": "m"},
+    "several keys, provider chosen": {
+        "GOOGLE_API_KEY": "g",
+        "OPENAI_API_KEY": "sk",
+        "NOTAFFECTED_LLM_PROVIDER": "openai",
+        "NOTAFFECTED_LLM_MODEL": "m",
+    },
+    "claude cli, its default model": {"NOTAFFECTED_LLM_PROVIDER": "claude-cli"},
+}
+
+
+@pytest.mark.parametrize("env", list(_CONFIG_CASES.values()), ids=list(_CONFIG_CASES))
+def test_status_says_configured_exactly_when_generate_would_send(monkeypatch, env):
+    from notaffected import local_model
+
+    _llm_env(monkeypatch, **env)
+    calls = _record_calls(monkeypatch)
+    monkeypatch.setattr(local_model.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    local_model.generate("hello")
+    sent = bool(calls)
+    calls.clear()
+
+    assert local_model.get_ai_status()["configured"] is sent
+    assert local_model.llm_configured() is sent
