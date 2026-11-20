@@ -108,3 +108,28 @@ def test_host_verdict_serialization():
     assert d["status"] == "not_affected"
     assert d["justification"] == "vulnerable_code_not_in_execute_path"
     assert d["probe_results"][0]["status"] == "NOT_MET"
+
+
+def test_provenance_fields_round_trip_and_defaults():
+    from notaffected.model import NON_AUTHORITATIVE_ORIGINS
+
+    assert NON_AUTHORITATIVE_ORIGINS == frozenset({"heuristic", "llm"})
+
+    pre = Precondition("sysctl_equals", {"key": "a.b", "value": "1"}, "d", origin="llm")
+    assert Precondition.from_dict(pre.to_dict()).origin == "llm"
+    old = {"probe": "sysctl_equals", "params": {"key": "a.b"}, "description": "d"}
+    assert Precondition.from_dict(old).origin == "curated"
+    with pytest.raises(ValueError, match="origin"):
+        Precondition("sysctl_equals", {}, "d", origin="guess")
+
+    spec = CheckSpec(cve_id="CVE-2026-0001", summary="s", os_source="heuristic")
+    assert CheckSpec.from_dict(spec.to_dict()).os_source == "heuristic"
+    assert CheckSpec.from_dict({"cve_id": "CVE-2026-0001"}).os_source == "curated"
+
+    res = ProbeResult(pre, ProbeStatus.MET, "e", "c", facts={"name": "openssl"})
+    assert res.to_dict()["facts"] == {"name": "openssl"}
+    assert ProbeResult(pre, ProbeStatus.MET, "e", "c").facts == {}
+
+    v = HostVerdict("h", "CVE-2026-0001", VerdictStatus.AFFECTED, "r", None, component_purl="pkg:deb/ubuntu/x@1")
+    assert v.to_dict()["component_purl"] == "pkg:deb/ubuntu/x@1"
+    assert HostVerdict("h", "CVE-2026-0001", VerdictStatus.AFFECTED, "r", None).component_purl is None

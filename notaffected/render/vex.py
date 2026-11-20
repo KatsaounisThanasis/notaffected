@@ -17,14 +17,21 @@ def build_openvex(
 ) -> dict[str, Any]:
     """Build a valid OpenVEX v0.2.0 document from a list of HostVerdicts."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    doc_id = f"https://openvex.dev/docs/notaffected/{uuid.uuid4()}"
+    doc_id = f"urn:uuid:{uuid.uuid4()}"
+    # A document about one host may name the package itself as the product, which is what
+    # scanners match (Trivy compares product PURLs). With several hosts that would make one
+    # host's statement apply to all of them, so the package becomes a subcomponent of the host.
+    # Repeated (CVE, package) pairs mean the "one host" is really several (or the caller merged
+    # runs), so those documents keep the host-scoped form too.
+    pkg_pairs = [(v.cve_id, v.component_purl) for v in verdicts if v.component_purl]
+    single_host = len({v.host for v in verdicts}) == 1 and len(pkg_pairs) == len(set(pkg_pairs))
 
     statements: list[dict[str, Any]] = []
     for v in verdicts:
         st: dict[str, Any] = {
             "vulnerability": {"name": v.cve_id},
             "timestamp": now_iso,
-            "products": [{"@id": v.product_id}],
+            "products": [_product(v, single_host)],
             "status": v.status.value,
         }
         if v.status == VerdictStatus.NOT_AFFECTED:
@@ -62,6 +69,14 @@ def build_openvex(
         "version": 1,
         "statements": statements,
     }
+
+
+def _product(v: HostVerdict, single_host: bool) -> dict[str, Any]:
+    if not v.component_purl:
+        return {"@id": v.product_id}
+    if single_host:
+        return {"@id": v.component_purl}
+    return {"@id": v.product_id, "subcomponents": [{"@id": v.component_purl}]}
 
 
 def write_openvex(

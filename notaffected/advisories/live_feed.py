@@ -16,6 +16,7 @@ from notaffected.advisories.builtin_specs import BUILTIN_SPECS
 from notaffected.advisories.extractor import extract_from_osv_payload, resolve_check_spec
 from notaffected.advisories.fetcher import DEFAULT_CACHE_DIR
 from notaffected.model import CheckSpec
+from notaffected.probes.primitives import _dpkg_status_installed
 from notaffected.probes.runner import HostRunner
 
 CISA_KEV_URL = (
@@ -141,7 +142,7 @@ def _probe_installed_watched_packages(runner: HostRunner) -> dict[str, str]:
         parts = first_line.split("\t")
         status_col = parts[0].strip() if parts else ""
         ver = parts[1].strip() if len(parts) > 1 else first_line.strip()
-        if status_col.startswith("ii") and ver:
+        if _dpkg_status_installed(status_col) and ver:
             installed[pkg] = ver
     return installed
 

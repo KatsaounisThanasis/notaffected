@@ -39,7 +39,12 @@ def resolve_host_patch_info(spec: CheckSpec, runner: HostRunner) -> PatchInfo:
     if not target_pkg or not fixed_ver:
         return base_patch
 
-    fixed_ver = _resolve_host_release_fix(runner, release_fixes, "", fixed_ver)
+    resolved = _resolve_host_release_fix(runner, release_fixes, "", fixed_ver)
+    if resolved is None:
+        return PatchInfo(status="unknown", advisory_url=base_patch.advisory_url)
+    fixed_ver = resolved[0]
+    if not fixed_ver:
+        return PatchInfo(status="unfixed", pocket=base_patch.pocket, advisory_url=base_patch.advisory_url)
 
     res = runner.run(["apt-cache", "policy", target_pkg])
     if res.transport_error or res.returncode != 0 or not res.stdout.strip():

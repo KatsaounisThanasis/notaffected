@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -13,8 +14,12 @@ from notaffected.model import CheckSpec, HostVerdict, VerdictStatus
 def render_spec(spec: CheckSpec, console: Console | None = None) -> None:
     """Render a CheckSpec (preconditions, mitigations, patch status) to the terminal."""
     con = console or Console()
-    title = f"[bold cyan]{spec.cve_id}[/bold cyan] ({spec.severity}) — source: {spec.source}, confidence: {spec.confidence}"
-    lines: list[str] = [f"[bold]Summary:[/bold] {spec.summary}", ""]
+    # Advisory, scanner and host strings are escaped: a '[/bold]' in them must print, not crash Rich.
+    title = (
+        f"[bold cyan]{escape(spec.cve_id)}[/bold cyan] ({escape(spec.severity)}) — source: {escape(spec.source)}, "
+        f"confidence: {escape(spec.confidence)}"
+    )
+    lines: list[str] = [f"[bold]Summary:[/bold] {escape(spec.summary)}", ""]
 
     lines.append("[bold]Required Attack Preconditions (all must hold for host to be AFFECTED):[/bold]")
     if not spec.preconditions:
@@ -22,7 +27,7 @@ def render_spec(spec: CheckSpec, console: Console | None = None) -> None:
     else:
         for idx, pre in enumerate(spec.preconditions, start=1):
             lines.append(
-                f"  {idx}. [yellow]{pre.probe}[/yellow] {pre.params} — {pre.description} "
+                f"  {idx}. [yellow]{pre.probe}[/yellow] {escape(str(pre.params))} — {escape(pre.description)} "
                 f"[dim](if false -> {pre.justification_if_not_met.value})[/dim]"
             )
 
@@ -30,7 +35,7 @@ def render_spec(spec: CheckSpec, console: Console | None = None) -> None:
         lines.append("")
         lines.append("[bold]Temporary Mitigations (until patch is installed):[/bold]")
         for m in spec.mitigation:
-            lines.append(f"  $ [green]{m}[/green]")
+            lines.append(f"  $ [green]{escape(m)}[/green]")
 
     lines.append("")
     patch_desc = f"status={spec.patch.status}"
@@ -38,7 +43,7 @@ def render_spec(spec: CheckSpec, console: Console | None = None) -> None:
         patch_desc += f", fixed_version={spec.patch.fixed_version}"
     if spec.patch.pocket:
         patch_desc += f", pocket={spec.patch.pocket}"
-    lines.append(f"[bold]Patch Status:[/bold] {patch_desc}")
+    lines.append(f"[bold]Patch Status:[/bold] {escape(patch_desc)}")
 
     con.print(Panel("\n".join(lines), title=title, expand=False))
 
@@ -54,10 +59,10 @@ def render_verdicts(
 
     for spec in specs:
         con.print(
-            f"\n[bold cyan]{spec.cve_id}[/bold cyan] [{spec.severity}] — {spec.summary}"
+            f"\n[bold cyan]{escape(spec.cve_id)}[/bold cyan] {escape(f'[{spec.severity}]')} — {escape(spec.summary)}"
         )
         con.print(
-            f"[dim]Source: {spec.source} | Confidence: {spec.confidence} | "
+            f"[dim]Source: {escape(spec.source)} | Confidence: {escape(spec.confidence)} | "
             f"Preconditions: {len(spec.preconditions)}[/dim]"
         )
 
@@ -70,18 +75,18 @@ def render_verdicts(
     if not affected:
         con.print("  [dim]None[/dim]")
     for v in affected:
-        con.print(f"  • [bold]{v.host}[/bold] ({v.cve_id})")
-        con.print(f"    Proof: {v.reason}")
+        con.print(f"  • [bold]{escape(v.host)}[/bold] ({escape(v.cve_id)})")
+        con.print(f"    Proof: {escape(v.reason)}")
         if v.mitigation:
             con.print("    Temporary Mitigation:")
             for cmd in v.mitigation:
-                con.print(f"      $ [yellow]{cmd}[/yellow]")
+                con.print(f"      $ [yellow]{escape(cmd)}[/yellow]")
         spec_obj = spec_map.get(v.cve_id)
         patch = v.patch or (spec_obj.patch if spec_obj else None)
         if patch and (patch.fixed_version or patch.pocket):
             pocket_note = f" in {patch.pocket}" if patch.pocket else ""
             con.print(
-                f"    Patch Status: {patch.status} (fixed version: {patch.fixed_version or 'pending'}{pocket_note})"
+                escape(f"    Patch Status: {patch.status} (fixed version: {patch.fixed_version or 'pending'}{pocket_note})")
             )
 
     if under_inv:
@@ -90,7 +95,7 @@ def render_verdicts(
             f"[bold yellow]UNDER INVESTIGATION ({len(under_inv)})[/bold yellow]"
         )
         for v in under_inv:
-            con.print(f"  • [bold]{v.host}[/bold] ({v.cve_id}) — {v.reason}")
+            con.print(f"  • [bold]{escape(v.host)}[/bold] ({escape(v.cve_id)}) — {escape(v.reason)}")
 
     con.print("")
     con.print(f"[bold green]NOT AFFECTED ({len(not_affected)})[/bold green]")
@@ -104,7 +109,7 @@ def render_verdicts(
         table.add_column("Deterministic Proof")
         for v in not_affected:
             just_str = v.justification.value if v.justification else "n/a"
-            table.add_row(v.host, v.cve_id, just_str, v.reason)
+            table.add_row(escape(v.host), escape(v.cve_id), escape(just_str), escape(v.reason))
         con.print(table)
 
 

@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 
 from notaffected import __version__
 from notaffected.advisories.ai_advisor import build_remediation_briefing
@@ -24,7 +25,7 @@ from notaffected.render.console import render_ai_briefing, render_spec, render_v
 from notaffected.render.html import write_html_report
 from notaffected.render.json_out import write_json_report
 from notaffected.render.vex import write_openvex
-from notaffected.web import run_web_server
+from notaffected.web import check_bind_address, run_web_server
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -120,6 +121,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8484,
         help="Port for local Web UI (default: 8484)",
+    )
+    p_ui.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow --bind on a non-loopback address (the dashboard can run probes over SSH with your keys)",
     )
 
     return parser
@@ -240,25 +246,30 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "ui":
+        check_bind_address(args.bind, args.allow_remote)
         console.print(
             f"[bold cyan]notaffected Web Dashboard listening on:[/bold cyan] "
             f"http://{args.bind}:{args.port} (Press Ctrl+C to stop)"
         )
-        run_web_server(host=args.bind, port=args.port)
+        run_web_server(host=args.bind, port=args.port, allow_remote=args.allow_remote)
         return 0
 
     if args.demo_fleet:
         runners = load_demo_fleet()
     else:
-        runners = load_runners(
-            host=args.host,
-            ssh_targets=args.ssh_targets,
-            win_ssh_targets=args.win_ssh_targets,
-            docker_targets=args.docker_targets,
-            win_docker_targets=args.win_docker_targets,
-            k8s_targets=args.k8s_targets,
-            inventory_path=args.inventory,
-        )
+        try:
+            runners = load_runners(
+                host=args.host,
+                ssh_targets=args.ssh_targets,
+                win_ssh_targets=args.win_ssh_targets,
+                docker_targets=args.docker_targets,
+                win_docker_targets=args.win_docker_targets,
+                k8s_targets=args.k8s_targets,
+                inventory_path=args.inventory,
+            )
+        except ValueError as exc:
+            console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
+            return 2
 
     if args.command == "scan":
         specs, feed_meta = collect_scan_specs(
@@ -286,22 +297,33 @@ def main(argv: list[str] | None = None) -> int:
         if len(non_builtin) > 1:
             fetch_advisories_concurrent(non_builtin)
         specs = []
-        seen_cves: set[str] = set()
+        seen_findings: set[tuple[str, str | None]] = set()
         for f in findings:
-            if f.cve_id in seen_cves:
+            # One spec per (CVE, package): a CVE can hit several packages with different states.
+            key = (f.cve_id, f.package_name)
+            if key in seen_findings:
                 continue
-            seen_cves.add(f.cve_id)
+            seen_findings.add(key)
             specs.append(
                 resolve_check_spec(
                     f.cve_id,
                     use_llm=args.llm,
                     package_hint=f.package_name,
                     fixed_version_hint=f.fixed_version,
+                    package_class=f.package_class,
                 )
             )
     else:
         return 2
     verdicts = evaluate_fleet(specs, runners)
+    # Write the outputs before rendering: a rendering problem must never lose the VEX/report files.
+    if args.emit_vex:
+        write_openvex(verdicts, args.emit_vex)
+    if args.json_out:
+        write_json_report(specs, verdicts, args.json_out)
+    if args.html_out:
+        write_html_report(specs, verdicts, args.html_out)
+
     render_verdicts(specs, verdicts, console=console)
 
     if args.ai_explain:
@@ -310,23 +332,14 @@ def main(argv: list[str] | None = None) -> int:
         render_ai_briefing(briefing, console=console)
 
     if args.emit_vex:
-        write_openvex(verdicts, args.emit_vex)
         console.print(
-            f"\n[bold cyan]OpenVEX v0.2.0 written to:[/bold cyan] {args.emit_vex} "
+            f"\n[bold cyan]OpenVEX v0.2.0 written to:[/bold cyan] {escape(str(args.emit_vex))} "
             f"({len(verdicts)} statement(s))"
         )
-
     if args.json_out:
-        write_json_report(specs, verdicts, args.json_out)
-        console.print(
-            f"[bold cyan]JSON audit report written to:[/bold cyan] {args.json_out}"
-        )
-
+        console.print(f"[bold cyan]JSON audit report written to:[/bold cyan] {escape(str(args.json_out))}")
     if args.html_out:
-        write_html_report(specs, verdicts, args.html_out)
-        console.print(
-            f"[bold cyan]Standalone HTML report written to:[/bold cyan] {args.html_out}"
-        )
+        console.print(f"[bold cyan]Standalone HTML report written to:[/bold cyan] {escape(str(args.html_out))}")
 
     if args.fail_on_affected and any(v.status.value == "affected" for v in verdicts):
         return 1

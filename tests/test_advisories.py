@@ -121,7 +121,6 @@ def test_fetcher_rejects_path_traversal_cve_id(tmp_path):
 
 def test_kernel_path_mapping_and_ubuntu_osv_merge(monkeypatch):
     from notaffected.advisories.extractor import KERNEL_PATH_TO_MODULE
-    from notaffected.advisories.fetcher import fetch_ubuntu_osv_advisory
 
     assert KERNEL_PATH_TO_MODULE["fs/smb/server/"] == "ksmbd"
     assert KERNEL_PATH_TO_MODULE["net/netfilter/"] == "nf_tables"
@@ -167,7 +166,6 @@ def test_kernel_path_mapping_and_ubuntu_osv_merge(monkeypatch):
     assert len(mod_probes) == 1
     assert mod_probes[0].params["module"] == "overlay"
     assert spec.confidence == "high"
-    assert callable(fetch_ubuntu_osv_advisory)
 
     # Verify 'nftables' prose maps to actual kernel module 'nf_tables'
     nft_osv = {
@@ -255,7 +253,8 @@ def test_llm_extractor_validates_required_probe_params_and_reference_snippets(mo
     )
     osv_sample = {
         "id": "CVE-2025-77777",
-        "summary": "Short summary",
+        # Grounding: the process the LLM proposes must be named in the advisory.
+        "summary": "nginx worker crash",
         "details": "Short details",
         "affected": [],
     }
@@ -333,3 +332,200 @@ def test_windows_advisory_heuristics_and_multi_provider_llm(monkeypatch):
 
 
 
+
+
+def _stub_llm(monkeypatch, answer):
+    monkeypatch.setattr("notaffected.advisories.extractor.generate_json", lambda *a, **k: answer)
+
+
+def test_llm_preconditions_are_grounded_tagged_and_cannot_pick_os_or_justification(monkeypatch):
+    from notaffected.model import VexJustification
+
+    osv = {
+        "id": "CVE-2025-0002",
+        "summary": "nginx resolver off-by-one allows remote code execution",
+        "details": "The nginx DNS resolver mishandles responses.",
+        "affected": [],
+    }
+    _stub_llm(
+        monkeypatch,
+        {
+            "os_family": "windows",
+            "preconditions": [
+                {"probe": "systemd_service_active", "params": {"service": "apache2.service"}, "description": "a"},
+                {
+                    "probe": "systemd_service_active",
+                    "params": {"service": "nginx.service"},
+                    "description": "n",
+                    "justification_if_not_met": "component_not_present",
+                },
+                {"probe": "sysctl_equals", "params": {"key": "-p", "value": "1"}, "description": "inj"},
+            ],
+            "mitigation": [],
+        },
+    )
+    spec = extract_from_osv_payload("CVE-2025-0002", osv, use_llm=True)
+    assert spec.os_family == "linux"  # the LLM's os_family is ignored
+    services = [p.params.get("service") for p in spec.preconditions if p.probe == "systemd_service_active"]
+    assert services == ["nginx.service"]  # apache2 is not named in the advisory
+    assert not any(p.probe == "sysctl_equals" for p in spec.preconditions)  # "-p" only inside a word
+    nginx = next(p for p in spec.preconditions if p.probe == "systemd_service_active")
+    assert nginx.origin == "llm"
+    assert nginx.justification_if_not_met == VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH
+
+
+def test_os_source_and_origins_from_extractor():
+    samba = {
+        "id": "CVE-2025-1111",
+        "summary": "Samba Active Directory DC allows privilege escalation",
+        "details": "A flaw in the Samba Active Directory domain controller.",
+        "affected": [],
+    }
+    spec = extract_from_osv_payload("CVE-2025-1111", samba)
+    assert (spec.os_family, spec.os_source) == ("windows", "heuristic")
+
+    mixed = {
+        "id": "CVE-2025-2222",
+        "summary": "Acme Agent remote code execution",
+        "details": "Acme Agent mishandles input.",
+        "affected": [],
+        "database_specific": {
+            "mitre_affected": [{"product": "Acme Agent for Windows"}, {"product": "Acme Agent for Linux"}]
+        },
+    }
+    spec = extract_from_osv_payload("CVE-2025-2222", mixed)
+    assert (spec.os_family, spec.os_source) == ("linux", "heuristic")
+
+    glibc = {
+        "id": "CVE-2025-3333",
+        "summary": "glibc buffer overflow reachable on the Linux kernel ABI boundary",
+        "details": "Affects glibc on systems running the Linux kernel.",
+        "affected": [
+            {
+                "package": {"ecosystem": "Ubuntu:24.04:LTS", "name": "glibc"},
+                "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.39-0ubuntu8.4"}]}],
+            }
+        ],
+    }
+    spec = extract_from_osv_payload("CVE-2025-3333", glibc)
+    probes = {p.probe: p for p in spec.preconditions}
+    assert "package_installed_vulnerable" in probes and "kernel_version_vulnerable" not in probes
+    assert probes["package_installed_vulnerable"].origin == "osv"
+    assert spec.os_source == "structured"
+
+    # Nothing the extractor builds may claim to be curated.
+    for payload in (samba, mixed, glibc):
+        s = extract_from_osv_payload(payload["id"], payload)
+        assert s.os_source != "curated"
+        assert all(p.origin != "curated" for p in s.preconditions)
+
+
+def test_release_fixes_record_every_listed_release():
+    from notaffected.advisories.extractor import _extract_release_fixes
+
+    osv = {
+        "id": "CVE-2025-4444",
+        "summary": "libfoo heap overflow",
+        "affected": [
+            {
+                "package": {"ecosystem": "Ubuntu:22.04:LTS", "name": "libfoo"},
+                "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1.2.0-1ubuntu0.22.04.1"}]}],
+            },
+            {
+                "package": {"ecosystem": "Ubuntu:24.04:LTS", "name": "libfoo"},
+                "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}],
+            },
+        ],
+    }
+    assert _extract_release_fixes(osv, "libfoo") == {"ubuntu:22.04": "1.2.0-1ubuntu0.22.04.1", "ubuntu:24.04": ""}
+
+    single = dict(osv, affected=osv["affected"][:1])
+    spec = extract_from_osv_payload("CVE-2025-4444", single)
+    pkg = next(p for p in spec.preconditions if p.probe == "package_installed_vulnerable")
+    assert pkg.params["release_fixes"] == {"ubuntu:22.04": "1.2.0-1ubuntu0.22.04.1"}
+
+
+def test_kernel_track_fixes_from_ubuntu_osv_fixture():
+    import gzip
+    import json
+    from pathlib import Path
+
+    from notaffected.advisories.extractor import _extract_kernel_track_fixes
+
+    raw = (Path(__file__).resolve().parent.parent / "fixtures/qa/osv/UBUNTU-CVE-2024-1086.json.gz").read_bytes()
+    tracks = _extract_kernel_track_fixes(json.loads(gzip.decompress(raw)))
+    assert tracks["ubuntu:22.04:5.15:generic"] == "5.15.0-101.111"
+    assert tracks["ubuntu:22.04:6.5:generic"] == "6.5.0-26.26~22.04.1"
+    assert tracks["ubuntu:22.04:6.2:generic"] == ""
+    assert tracks["ubuntu:22.04:5.15:azure"] == "5.15.0-1059.67"
+    assert not any(k.startswith("ubuntu:pro") for k in tracks)
+
+
+def test_ubuntu_osv_advisory_is_served_from_cache_without_network(tmp_path, monkeypatch):
+    import gzip
+    import urllib.error
+    import urllib.request
+    from pathlib import Path
+
+    from notaffected.advisories.fetcher import fetch_ubuntu_osv_advisory
+
+    def _offline(*_a, **_k):
+        raise urllib.error.URLError("network disabled in tests")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _offline)
+    src = Path(__file__).resolve().parent.parent / "fixtures" / "qa" / "osv" / "UBUNTU-CVE-2024-1086.json.gz"
+    (tmp_path / "UBUNTU-CVE-2024-1086.json").write_bytes(gzip.decompress(src.read_bytes()))
+    data = fetch_ubuntu_osv_advisory("CVE-2024-1086", cache_dir=tmp_path)
+    assert data is not None and data["id"] == "UBUNTU-CVE-2024-1086"
+    assert len(data["affected"]) > 100
+    assert fetch_ubuntu_osv_advisory("CVE-2099-0001", cache_dir=tmp_path) is None  # miss + no network
+
+
+def test_language_ecosystem_advisory_is_never_probed_as_an_os_package():
+    from notaffected.engine.evaluator import evaluate_host
+    from notaffected.model import VerdictStatus
+    from notaffected.probes.primitives import WIN_BUILD_ARGV
+    from notaffected.probes.runner import CommandResult, MockRunner
+
+    pypi = {
+        "id": "PYSEC-2023-74",
+        "summary": "Requests leaks Proxy-Authorization headers",
+        "details": "Requests forwards proxy credentials on redirects.",
+        "affected": [
+            {
+                "package": {"ecosystem": "PyPI", "name": "requests"},
+                "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "2.3.0"}, {"fixed": "2.31.0"}]}],
+            }
+        ],
+    }
+    spec = extract_from_osv_payload("PYSEC-2023-74", pypi)
+    assert not any(p.probe == "package_installed_vulnerable" for p in spec.preconditions)
+    assert spec.os_source == "heuristic"
+    linux = MockRunner("lin", {}, simulate_dpkg_db=True)
+    win = MockRunner("win", {tuple(WIN_BUILD_ARGV): CommandResult(0, "BUILD=20348.2402|KBS=\n", "")}, os_family="windows")
+    for runner in (linux, win):
+        assert evaluate_host(spec, runner).status == VerdictStatus.UNDER_INVESTIGATION, runner.host_name
+
+    # a scanner OS-package hint keeps its own package, but never borrows the PyPI fixed version
+    hinted = extract_from_osv_payload("PYSEC-2023-74", pypi, package_hint="python3-requests")
+    pkg = next(p for p in hinted.preconditions if p.probe == "package_installed_vulnerable")
+    assert pkg.params["package"] == "python3-requests" and pkg.params["fixed_version"] == ""
+
+
+def test_windows_kb_from_prose_never_overrides_the_mitre_build():
+    osv = {
+        "id": "CVE-2025-5555",
+        "summary": "Windows TCP/IP remote code execution",
+        "details": "An earlier issue was fixed by KB5005033.",
+        "affected": [],
+        "references": [{"url": "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2025-5555"}],
+        "database_specific": {
+            "mitre_affected": [
+                {"product": "Windows Server 2022", "versions": [{"lessThan": "10.0.20348.2700"}]}
+            ]
+        },
+    }
+    spec = extract_from_osv_payload("CVE-2025-5555", osv)
+    build = next(p for p in spec.preconditions if p.probe == "windows_build_vulnerable")
+    assert "kb" not in build.params and build.params["fixed_build"] == "20348.2700"
+    assert build.origin == "osv"

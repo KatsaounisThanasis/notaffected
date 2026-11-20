@@ -62,6 +62,7 @@ class LocalRunner:
                 argv,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=self.timeout,
                 shell=False,
                 check=False,
@@ -147,6 +148,7 @@ class SSHRunner:
                 ssh_argv,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=self.timeout + 5,
                 shell=False,
                 check=False,
@@ -205,6 +207,7 @@ class DockerRunner:
                 docker_argv,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=self.timeout,
                 shell=False,
                 check=False,
@@ -297,6 +300,7 @@ class K8sRunner:
                 k_argv,
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=self.timeout,
                 shell=False,
                 check=False,
@@ -360,6 +364,12 @@ class MockRunner:
                 )
             if len(argv) >= 2 and argv[0] == "systemctl" and argv[1] == "is-active":
                 return CommandResult(returncode=3, stdout="inactive\n", stderr="")
+            if argv[:4] == ["systemctl", "show", "-p", "LoadState"]:
+                return CommandResult(returncode=0, stdout="loaded\n", stderr="")
+            if len(argv) == 3 and argv[0] == "dpkg-query" and argv[1] == "-W":
+                return CommandResult(returncode=0, stdout="", stderr="")  # full listing: no source match
+            if argv == ["ip", "-o", "link", "show", "docker0"]:
+                return CommandResult(returncode=1, stdout="", stderr='Device "docker0" does not exist.\n')
             if len(argv) >= 3 and argv[0] == "sysctl" and argv[1] == "-n":
                 return CommandResult(returncode=0, stdout="1\n", stderr="")
             if argv[0] == "powershell" and "Get-Service" in argv[-1]:

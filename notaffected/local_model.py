@@ -93,7 +93,7 @@ def _run_agy_cli(prompt: str, model: str | None = None, timeout: int = 60) -> st
         "agy",
         "-p",
         prompt,
-        "--dangerously-skip-permissions",
+        # Untrusted advisory text goes into the prompt: no permission bypass, sandboxed.
         "--sandbox",
         "--print-timeout",
         f"{max(1, timeout // 60)}m",
@@ -234,12 +234,8 @@ def generate(
     """Query the configured/detected model once. Returns response text or '' on any failure."""
     provider = detect_provider()
     if provider == "claude-cli":
-        out = _run_claude_cli(prompt, model=model, timeout=timeout)
-        if out:
-            return out
-        if shutil.which("agy"):
-            return _run_agy_cli(prompt, model=None, timeout=timeout)
-        return ""
+        # No silent switch to another provider: a failure falls back to deterministic output.
+        return _run_claude_cli(prompt, model=model, timeout=timeout)
     if provider == "agy-cli":
         return _run_agy_cli(prompt, model=model, timeout=timeout)
 

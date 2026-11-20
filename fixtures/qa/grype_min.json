@@ -1,0 +1,7 @@
+{"matches": [
+  {"vulnerability": {"id": "GHSA-j8r2-6x86-q33q", "severity": "Medium", "fix": {"versions": ["2.31.0"], "state": "fixed"}},
+   "relatedVulnerabilities": [{"id": "CVE-2023-32681"}],
+   "artifact": {"name": "requests", "version": "2.25.1", "type": "python", "purl": "pkg:pypi/requests@2.25.1"}},
+  {"vulnerability": {"id": "CVE-2024-47176", "severity": "Critical", "fix": {"versions": ["2.0.0-0ubuntu10.2"], "state": "fixed"}},
+   "artifact": {"name": "cups-browsed", "version": "2.0.0-0ubuntu10.1", "type": "deb", "purl": "pkg:deb/ubuntu/cups-browsed@2.0.0-0ubuntu10.1"}}
+], "source": {"type": "image"}, "descriptor": {"name": "grype"}}

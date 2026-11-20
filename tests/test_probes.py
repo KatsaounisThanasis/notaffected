@@ -11,6 +11,8 @@ def test_kernel_module_loaded_met_and_not_met():
         host_name="node-01",
         responses={
             ("cat", "/proc/modules"): CommandResult(0, proc_modules, ""),
+            # not loaded is proof only when the module is blocked from loading
+            ("modprobe", "-c"): CommandResult(0, "blacklist floppy\ninstall ksmbd /bin/false\n", ""),
         },
     )
     pre_met = Precondition(
@@ -29,7 +31,7 @@ def test_kernel_module_loaded_met_and_not_met():
     )
     res_not_met = run_probe(pre_not_met, runner)
     assert res_not_met.status == ProbeStatus.NOT_MET
-    assert "not loaded" in res_not_met.evidence
+    assert "not loaded" in res_not_met.evidence and "blocked" in res_not_met.evidence
 
 
 def test_sysctl_equals_met_not_met_and_unknown():
@@ -101,6 +103,12 @@ def test_package_probe_distinguishes_absent_from_ssh_failure():
             ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "cups-browsed"): CommandResult(
                 1, "", "dpkg-query: no packages found matching cups-browsed\n"
             ),
+            # the full listing answers on a real dpkg host; nothing builds from a 'cups-browsed' source
+            (
+                "dpkg-query",
+                "-W",
+                "-f=${db:Status-Abbrev}\\t${binary:Package}\\t${source:Package}\\t${Version}\\t${source:Version}\\n",
+            ): CommandResult(0, "", ""),
         },
     )
     pre = Precondition(
@@ -148,6 +156,7 @@ def test_firewall_probe_permission_denied_yields_unknown():
         host_name="laptop-ufw",
         responses={
             ("ufw", "status", "verbose"): CommandResult(0, ufw_blocking, ""),
+            ("ip", "-o", "link", "show", "docker0"): CommandResult(1, "", 'Device "docker0" does not exist.\n'),
         },
     )
     res_block = run_probe(pre, runner_ufw_block)
@@ -162,6 +171,10 @@ def test_kernel_version_and_systemd_probes():
             ("uname", "-r"): CommandResult(0, "6.8.0-40-generic\n", ""),
             ("dpkg", "--compare-versions", "6.8.0-40", "lt", "6.8.0-45"): CommandResult(0, "", ""),
             ("systemctl", "is-active", "cups-browsed.service"): CommandResult(3, "inactive\n", ""),
+            ("systemctl", "show", "-p", "LoadState", "--value", "cups-browsed.service"): CommandResult(
+                0, "loaded\n", ""
+            ),
+            ("systemctl", "is-active", "cups-browsed.socket"): CommandResult(3, "inactive\n", ""),
         },
     )
     pre_kern = Precondition(
@@ -412,6 +425,7 @@ def test_live_apt_policy_patch_tracker():
     runner_ready = MockRunner(
         host_name="srv-ready",
         responses={
+            ("cat", "/etc/os-release"): CommandResult(0, 'ID=ubuntu\nVERSION_ID="24.04"\n', ""),
             ("apt-cache", "policy", "cups-browsed"): CommandResult(0, apt_policy_ready, ""),
             ("dpkg", "--compare-versions", "2.0.0-0ubuntu10.3", "ge", "2.0.0-0ubuntu10.2"): CommandResult(0, "", ""),
         },
@@ -619,3 +633,351 @@ def test_package_installed_source_package_fallback() -> None:
 
 
 
+
+
+def _pkg_pre(fixed: str = "") -> Precondition:
+    return Precondition("package_installed_vulnerable", {"package": "openssh-server", "fixed_version": fixed}, "pkg")
+
+
+def _dpkg_q(status_ver: str) -> dict:
+    return {
+        ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "openssh-server"): CommandResult(
+            0, status_ver, ""
+        )
+    }
+
+
+def test_dpkg_status_abbrev_second_char_decides_installed():
+    # held package (hi) is installed and vulnerable
+    resp = _dpkg_q("hi \t1:9.6p1-3ubuntu13\n")
+    resp[("dpkg", "--compare-versions", "1:9.6p1-3ubuntu13", "lt", "1:9.6p1-3ubuntu13.3")] = CommandResult(0, "", "")
+    res = run_probe(_pkg_pre("1:9.6p1-3ubuntu13.3"), MockRunner("h", resp))
+    assert res.status == ProbeStatus.MET, res.evidence
+    # unpacked but not configured (iU) still has the files on disk
+    assert run_probe(_pkg_pre(), MockRunner("h", _dpkg_q("iU \t1:9.6p1-3ubuntu13\n"))).status == ProbeStatus.MET
+    # removed, config files only (rc) is absent
+    assert run_probe(_pkg_pre(), MockRunner("h", _dpkg_q("rc \t1:9.6p1-3ubuntu13\n"))).status == ProbeStatus.NOT_MET
+
+
+def test_version_comparison_never_guesses():
+    # dpkg rejects the version with a warning (rc 1): unreadable, not "patched"
+    kpre = Precondition("kernel_version_vulnerable", {"fixed_version": "6.8.0-45"}, "k")
+    runner = MockRunner(
+        "h",
+        {
+            ("uname", "-r"): CommandResult(0, "abc\n", ""),
+            ("dpkg", "--compare-versions", "abc", "lt", "6.8.0-45"): CommandResult(
+                1, "", "dpkg: warning: version 'abc' has bad syntax: version number does not start with digit\n"
+            ),
+        },
+    )
+    assert run_probe(kpre, runner).status == ProbeStatus.UNKNOWN
+
+    # rpm host (no dpkg-query, no dpkg): no digit-list fallback, so UNKNOWN
+    rpm_runner = MockRunner(
+        "rhel9",
+        {("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\\n", "openssh-server"): CommandResult(0, "8.7p1-38.el9\n", "")},
+    )
+    res = run_probe(_pkg_pre("1:9.6p1-3ubuntu13.3"), rpm_runner)
+    assert res.status == ProbeStatus.UNKNOWN, res.evidence
+
+    # apk comparator fails: UNKNOWN instead of a digit-list guess
+    apk_runner = MockRunner(
+        "alpine",
+        {
+            ("apk", "info", "-e", "-v", "openssh-server"): CommandResult(0, "openssh-server-9.7_p1-r3\n", ""),
+            ("apk", "version", "-t", "9.7_p1-r3", "9.7_p1-r4"): CommandResult(1, "", "apk: error\n"),
+        },
+    )
+    res = run_probe(_pkg_pre("9.7_p1-r4"), apk_runner)
+    assert res.status == ProbeStatus.UNKNOWN, res.evidence
+
+
+def _rel_runner(os_release: str, dpkg_line: str | None) -> MockRunner:
+    resp = {("cat", "/etc/os-release"): CommandResult(0, os_release, "")}
+    q = ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "libfoo")
+    resp[q] = CommandResult(0, dpkg_line, "") if dpkg_line else CommandResult(1, "", "dpkg-query: no packages found matching libfoo\n")
+    if not dpkg_line:
+        resp[
+            (
+                "dpkg-query",
+                "-W",
+                "-f=${db:Status-Abbrev}\\t${binary:Package}\\t${source:Package}\\t${Version}\\t${source:Version}\\n",
+            )
+        ] = CommandResult(0, "", "")
+    return MockRunner("h", resp)
+
+
+def test_release_fixes_never_borrow_another_release_fix():
+    fixes = {"ubuntu:22.04": "1.2.0-1ubuntu0.22.04.1", "ubuntu:24.04": ""}
+    pre = Precondition(
+        "package_installed_vulnerable",
+        {"package": "libfoo", "fixed_version": "1.2.0-1ubuntu0.22.04.1", "release_fixes": fixes},
+        "libfoo",
+    )
+    noble = 'ID=ubuntu\nVERSION_ID="24.04"\n'
+    # listed as affected with no fix on the host's release -> MET, never the 22.04 fix
+    res = run_probe(pre, _rel_runner(noble, "ii \t1.4.0-2build1\n"))
+    assert res.status == ProbeStatus.MET, res.evidence
+    assert "no fix" in res.evidence
+    # host release not listed -> UNKNOWN, installed or not (package names differ across distros)
+    bookworm = 'ID=debian\nVERSION_ID="12"\n'
+    assert run_probe(pre, _rel_runner(bookworm, "ii \t1.4.0-2\n")).status == ProbeStatus.UNKNOWN
+    assert run_probe(pre, _rel_runner(bookworm, None)).status == ProbeStatus.UNKNOWN
+
+
+def test_kernel_track_parsing():
+    from notaffected.probes.primitives import _kernel_track
+
+    assert _kernel_track("6.5.0-14-generic") == ("6.5", "generic")
+    assert _kernel_track("6.8.0-1001-azure") == ("6.8", "azure")
+    assert _kernel_track("5.15.0-1059-azure-fde") == ("5.15", "azure-fde")
+    assert _kernel_track("6.8.0-40-lowlatency") == ("6.8", "lowlatency")
+    assert _kernel_track("5.14.0-427.13.1.el9_4.x86_64") == ("5.14", "")
+    assert _kernel_track("6.1.0-17-amd64") == ("6.1", "amd64")
+
+
+def _kernel_runner(uname: str, extra: dict | None = None) -> MockRunner:
+    resp = {("uname", "-r"): CommandResult(0, uname + "\n", "")}
+    resp.update(extra or {})
+    return MockRunner("k", resp)
+
+
+def test_kernel_compared_only_within_its_own_track():
+    jammy = {("cat", "/etc/os-release"): CommandResult(0, 'ID=ubuntu\nVERSION_ID="22.04"\n', "")}
+    tracks = {
+        "ubuntu:22.04:5.15:generic": "5.15.0-101.111",
+        "ubuntu:22.04:6.5:generic": "6.5.0-26.26~22.04.1",
+        "ubuntu:22.04:6.2:generic": "",
+    }
+    pre = Precondition("kernel_version_vulnerable", {"fixed_version": "5.15.0-101.111", "track_fixes": tracks}, "k")
+    hwe = dict(jammy)
+    hwe[("dpkg", "--compare-versions", "6.5.0-14", "lt", "6.5.0-26")] = CommandResult(0, "", "")
+    assert run_probe(pre, _kernel_runner("6.5.0-14-generic", hwe)).status == ProbeStatus.MET
+    res = run_probe(pre, _kernel_runner("6.2.0-39-generic", jammy))
+    assert res.status == ProbeStatus.MET and "no fix" in res.evidence
+    # a track the advisory does not list (cloud flavour, other distro) is never compared
+    assert run_probe(pre, _kernel_runner("5.15.0-1059-azure", jammy)).status == ProbeStatus.UNKNOWN
+
+    legacy = Precondition("kernel_version_vulnerable", {"fixed_version": "6.8.0-45"}, "k")
+    for uname in ("6.8.0-1001-azure", "5.14.0-427.13.1.el9_4.x86_64", "7.0.0-43-generic"):
+        assert run_probe(legacy, _kernel_runner(uname)).status == ProbeStatus.UNKNOWN, uname
+
+    mainline = Precondition("kernel_version_vulnerable", {"fixed_version": "6.2.0-21", "mainline_from": "6.4"}, "k")
+    res = run_probe(mainline, _kernel_runner("6.8.0-40-generic"))
+    assert res.status == ProbeStatus.NOT_MET and "upstream fix" in res.evidence
+
+
+def _ufw(rules: str, default: str = "deny") -> str:
+    return (
+        "Status: active\nLogging: on (low)\n"
+        f"Default: {default} (incoming), allow (outgoing), disabled (routed)\n\n"
+        "To                         Action      From\n--                         ------      ----\n" + rules
+    )
+
+
+def _fw(port: str, out: str, docker0: bool = False) -> ProbeStatus:
+    resp = {("ufw", "status", "verbose"): CommandResult(0, out, "")}
+    resp[("ip", "-o", "link", "show", "docker0")] = (
+        CommandResult(0, "4: docker0: <BROADCAST> mtu 1500\n", "") if docker0 else CommandResult(1, "", "")
+    )
+    pre = Precondition("firewall_allows_port", {"port": port, "proto": "tcp"}, "fw")
+    return run_probe(pre, MockRunner("fw", resp)).status
+
+
+def test_ufw_rules_are_parsed_by_column():
+    assert _fw("8080", _ufw("8000:9000/tcp              ALLOW IN    Anywhere\n")) == ProbeStatus.MET
+    assert _fw("22", _ufw("22/tcp                     LIMIT IN    Anywhere\n")) == ProbeStatus.MET
+    assert _fw("22", _ufw("22/tcp                     ALLOW IN    Anywhere                   # from outside\n")) == ProbeStatus.MET
+    assert _fw("443", _ufw("80,443/tcp                 ALLOW IN    Anywhere\n")) == ProbeStatus.MET
+    # source-restricted or app-profile rules cannot be matched to "reachable from anywhere"
+    assert _fw("22", _ufw("Anywhere                   ALLOW IN    10.0.0.0/8\n")) == ProbeStatus.UNKNOWN
+    assert _fw("22", _ufw("OpenSSH                    ALLOW IN    Anywhere\n")) == ProbeStatus.UNKNOWN
+    # outgoing rules never open an incoming port
+    assert _fw("22", _ufw("22/tcp                     ALLOW OUT   Anywhere\n")) == ProbeStatus.NOT_MET
+    # default deny with no matching rule is NOT_MET, unless Docker can publish ports around ufw
+    assert _fw("22", _ufw("80/tcp                     ALLOW IN    Anywhere\n")) == ProbeStatus.NOT_MET
+    assert _fw("22", _ufw("80/tcp                     ALLOW IN    Anywhere\n"), docker0=True) == ProbeStatus.UNKNOWN
+    assert _fw("any", _ufw(""), docker0=True) == ProbeStatus.UNKNOWN
+    # a rule row without the table header still counts (never a silent NOT_MET)
+    headerless = "Status: active\nDefault: deny (incoming)\n443/tcp ALLOW IN Anywhere\n"
+    assert _fw("443", headerless) == ProbeStatus.MET
+    assert _fw("any", headerless) == ProbeStatus.MET
+
+
+def test_ss_listener_without_visible_process_or_unlisted_proto_is_unknown():
+    ss_out = "tcp LISTEN 0 100 0.0.0.0:8080 0.0.0.0:*\n"
+    pre = Precondition("network_listener", {"proto": "tcp", "port": 8080, "process": "java"}, "l")
+    res = run_probe(pre, MockRunner("h", {("ss", "-tulpnH"): CommandResult(0, ss_out, "")}))
+    assert res.status == ProbeStatus.UNKNOWN and "hidden" in res.evidence
+    own = 'tcp LISTEN 0 100 0.0.0.0:8080 0.0.0.0:* users:(("nginx",pid=1,fd=6))\n'
+    res = run_probe(pre, MockRunner("h", {("ss", "-tulpnH"): CommandResult(0, own, "")}))
+    assert res.status == ProbeStatus.NOT_MET  # process info visible and it is not java
+    sctp = Precondition("network_listener", {"proto": "sctp", "port": 3868}, "l")
+    assert run_probe(sctp, MockRunner("h", {("ss", "-tulpnH"): CommandResult(0, ss_out, "")})).status == ProbeStatus.UNKNOWN
+
+
+def test_systemd_unit_not_found_or_invalid_is_unknown_and_socket_activation_counts():
+    pre = Precondition("systemd_service_active", {"service": "ssh.service"}, "s")
+    not_found = MockRunner("h", {("systemctl", "is-active", "ssh.service"): CommandResult(4, "inactive\n", "")})
+    assert run_probe(pre, not_found).status == ProbeStatus.UNKNOWN
+    inactive = {
+        ("systemctl", "is-active", "ssh.service"): CommandResult(3, "inactive\n", ""),
+        ("systemctl", "show", "-p", "LoadState", "--value", "ssh.service"): CommandResult(0, "loaded\n", ""),
+    }
+    inactive[("systemctl", "is-active", "ssh.socket")] = CommandResult(3, "inactive\n", "")
+    assert run_probe(pre, MockRunner("h", inactive)).status == ProbeStatus.NOT_MET
+    inactive[("systemctl", "is-active", "ssh.socket")] = CommandResult(0, "active\n", "")
+    res = run_probe(pre, MockRunner("h", inactive))
+    assert res.status == ProbeStatus.MET and "ssh.socket" in res.evidence
+    bad = Precondition("systemd_service_active", {"service": "-H evil"}, "s")
+    assert run_probe(bad, MockRunner("h", {})).status == ProbeStatus.UNKNOWN
+
+    proc = Precondition("process_running", {"process": "sshd", "socket_unit": "ssh.socket"}, "p")
+    resp = {
+        ("ps", "-eo", "comm,args", "--no-headers"): CommandResult(0, "systemd /sbin/init\n", ""),
+        ("systemctl", "is-active", "ssh.socket"): CommandResult(0, "active\n", ""),
+    }
+    res = run_probe(proc, MockRunner("h", resp))
+    assert res.status == ProbeStatus.MET and "on demand" in res.evidence
+
+
+
+class _Recorder(MockRunner):
+    def __init__(self, responses: dict):
+        super().__init__("rec", responses)
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(self, argv):
+        self.calls.append(tuple(argv))
+        return super().run(argv)
+
+
+def test_module_not_loaded_is_proof_only_when_blocked():
+    mods = {("cat", "/proc/modules"): CommandResult(0, "tls 1 0 - Live\n", "")}
+    pre = Precondition("kernel_module_loaded", {"module": "nf_tables"}, "m")
+    loadable = dict(mods)
+    loadable[("modprobe", "-c")] = CommandResult(0, "blacklist floppy\nalias net-pf-16-proto-12 nfnetlink\n", "")
+    loadable[("cat", "/proc/sys/kernel/modules_disabled")] = CommandResult(0, "0\n", "")
+    res = run_probe(pre, MockRunner("h", loadable))
+    assert res.status == ProbeStatus.UNKNOWN and "on demand" in res.evidence
+    disabled = dict(loadable)
+    disabled[("cat", "/proc/sys/kernel/modules_disabled")] = CommandResult(0, "1\n", "")
+    assert run_probe(pre, MockRunner("h", disabled)).status == ProbeStatus.NOT_MET
+    bad = Precondition("kernel_module_loaded", {"module": "nf_tables; reboot"}, "m")
+    assert run_probe(bad, MockRunner("h", mods)).status == ProbeStatus.UNKNOWN
+
+
+def test_sysctl_option_injection_is_refused_without_running_anything():
+    for key in ("--system", "-p", "a b"):
+        rec = _Recorder({})
+        res = run_probe(Precondition("sysctl_equals", {"key": key, "value": "1"}, "s"), rec)
+        assert res.status == ProbeStatus.UNKNOWN, key
+        assert rec.calls == [], key
+
+
+def test_config_first_occurrence_semantics_for_sshd():
+    def cfg(text: str, sshd_t: str | None = None) -> MockRunner:
+        resp = {("cat", "/etc/ssh/sshd_config"): CommandResult(0, text, "")}
+        if sshd_t is not None:
+            resp[("sshd", "-T")] = CommandResult(0, sshd_t, "")
+        return MockRunner("ssh", resp)
+
+    pre = Precondition(
+        "config_contains",
+        {
+            "path": "/etc/ssh/sshd_config",
+            "pattern": r"^\s*LoginGraceTime\s+0\b",
+            "negate": True,
+            "semantics": "first",
+            "directive": "LoginGraceTime",
+        },
+        "grace",
+    )
+    # sshd uses the FIRST value: an appended "LoginGraceTime 0" after 60 does not mitigate
+    assert run_probe(pre, cfg("Port 22\nLoginGraceTime 60\nLoginGraceTime 0\n")).status == ProbeStatus.MET
+    assert run_probe(pre, cfg("LoginGraceTime 0\nLoginGraceTime 60\n")).status == ProbeStatus.NOT_MET
+    # an Include can override the main file: without `sshd -T` the effective value is unknown
+    inc = "Include /etc/ssh/sshd_config.d/*.conf\nLoginGraceTime 0\n"
+    assert run_probe(pre, cfg(inc)).status == ProbeStatus.UNKNOWN
+    # `sshd -T` (effective config) wins when it is readable
+    assert run_probe(pre, cfg(inc, "port 22\nlogingracetime 0\n")).status == ProbeStatus.NOT_MET
+    assert run_probe(pre, cfg(inc, "port 22\nlogingracetime 120\n")).status == ProbeStatus.MET
+
+    # generic configs: full-line ';' comments are skipped like '#'
+    ini = Precondition("config_contains", {"path": "/etc/samba/smb.conf", "pattern": r"^server min protocol"}, "ini")
+    runner = MockRunner("smb", {("cat", "/etc/samba/smb.conf"): CommandResult(0, "; server min protocol = SMB3\n", "")})
+    assert run_probe(ini, runner).status == ProbeStatus.NOT_MET
+
+
+def test_helper_checks_that_cannot_run_are_unknown_not_absent():
+    transport = CommandResult(255, "", "ssh: connection reset", transport_error=True)
+    inactive = {
+        ("systemctl", "is-active", "cups-browsed.service"): CommandResult(3, "inactive\n", ""),
+        ("systemctl", "show", "-p", "LoadState", "--value", "cups-browsed.service"): CommandResult(0, "loaded\n", ""),
+        ("systemctl", "is-active", "cups-browsed.socket"): transport,
+    }
+    svc = Precondition("systemd_service_active", {"service": "cups-browsed.service"}, "s")
+    assert run_probe(svc, MockRunner("h", inactive)).status == ProbeStatus.UNKNOWN
+
+    proc = Precondition("process_running", {"process": "sshd", "socket_unit": "ssh.socket"}, "p")
+    resp = {
+        ("ps", "-eo", "comm,args", "--no-headers"): CommandResult(0, "systemd /sbin/init\n", ""),
+        ("systemctl", "is-active", "ssh.socket"): transport,
+    }
+    assert run_probe(proc, MockRunner("h", resp)).status == ProbeStatus.UNKNOWN
+
+    deny = _ufw("80/tcp                     ALLOW IN    Anywhere\n")
+    fw = Precondition("firewall_allows_port", {"port": "22", "proto": "tcp"}, "fw")
+    for ip_res, expected in (
+        (transport, ProbeStatus.UNKNOWN),
+        (CommandResult(127, "", "ip: command not found"), ProbeStatus.UNKNOWN),
+        (CommandResult(1, "", 'Device "docker0" does not exist.'), ProbeStatus.NOT_MET),
+    ):
+        runner = MockRunner(
+            "h",
+            {("ufw", "status", "verbose"): CommandResult(0, deny, ""), ("ip", "-o", "link", "show", "docker0"): ip_res},
+        )
+        assert run_probe(fw, runner).status == expected, ip_res
+
+
+def test_ufw_without_visible_default_policy_is_unknown():
+    runner = MockRunner(
+        "h",
+        {
+            ("ufw", "status", "verbose"): CommandResult(1, "", "ERROR"),
+            ("ufw", "status"): CommandResult(0, "Status: active\n", ""),
+            ("ip", "-o", "link", "show", "docker0"): CommandResult(1, "", ""),
+        },
+    )
+    fw = Precondition("firewall_allows_port", {"port": "22", "proto": "tcp"}, "fw")
+    assert run_probe(fw, runner).status == ProbeStatus.UNKNOWN
+
+
+def test_dpkg_warning_in_any_language_is_unreadable_not_patched():
+    kpre = Precondition("kernel_version_vulnerable", {"fixed_version": "6.8.0-45"}, "k")
+    runner = MockRunner(
+        "h",
+        {
+            ("uname", "-r"): CommandResult(0, "6.8.0-40-generic\n", ""),
+            ("dpkg", "--compare-versions", "6.8.0-40", "lt", "6.8.0-45"): CommandResult(
+                1, "", "dpkg: Warnung: Version »6.8.0-40« hat falsche Syntax\n"
+            ),
+        },
+    )
+    assert run_probe(kpre, runner).status == ProbeStatus.UNKNOWN
+
+
+def test_failed_source_package_listing_is_unknown_not_absent():
+    pre = Precondition("package_installed_vulnerable", {"package": "openssh"}, "p")
+    src_fmt = "-f=${db:Status-Abbrev}\\t${binary:Package}\\t${source:Package}\\t${Version}\\t${source:Version}\\n"
+    runner = MockRunner(
+        "h",
+        {
+            ("dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", "openssh"): CommandResult(
+                1, "", "dpkg-query: no packages found matching openssh\n"
+            ),
+            ("dpkg-query", "-W", src_fmt): CommandResult(255, "", "timeout", transport_error=True),
+        },
+    )
+    assert run_probe(pre, runner).status == ProbeStatus.UNKNOWN

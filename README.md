@@ -14,11 +14,11 @@ Every week dozens of new CVEs are published, and AI-assisted research is finding
 `notaffected` bridges the gap between security advisories and the real runtime state of your Linux and Windows Server hosts, containers, and Kubernetes pods:
 
 1. **Extracts attack preconditions** from advisories (built-in golden specs for Linux & Windows, OSV.dev / Ubuntu OSV records, kernel commit paths, and optional schema-validated multi-provider LLM extraction via Gemini, Claude, OpenAI, or Ollama).
-2. **Runs deterministic, read-only probes** on your targets (local host, Linux/Windows SSH fleet, Docker containers, or Kubernetes pods). **AI never decides the verdict and never runs shell commands** — only real system checks produce a decision, and uncertainty always resolves to `under_investigation`, never a false `not_affected`.
+2. **Runs deterministic, read-only probes** on your targets (local host, Linux/Windows SSH fleet, Docker containers, or Kubernetes pods). **AI never decides the verdict and never runs shell commands**: the optional LLM may only propose parameters for the closed probe set, each one must be named in the advisory, it never sets the OS family or the VEX justification, and a `NOT_MET` from an LLM-proposed or keyword-heuristic check never yields `not_affected` on its own. `not_affected` needs a `NOT_MET` from a curated or structured-data check (or a probe-confirmed OS mismatch); every check that cannot compare, see or confirm something resolves to `under_investigation`.
 3. **Delivers actionable output:**
-   - The short list of hosts that are **truly affected**, the exact temporary mitigation commands (`ufw`, `sysctl`, `modprobe -r`, `systemctl`, or PowerShell `Set-ItemProperty` / `Stop-Service`) to run right now, live APT/KB patch status, and an optional **AI Operational Risk & Remediation Briefing** (`--ai-explain`).
-   - For every unaffected host, **`not_affected` with deterministic proof** (e.g. module not loaded, service listening only on `127.0.0.1`, firewall default deny, or Windows Registry mitigation active).
-   - A standard **OpenVEX v0.2.0** file (`.vex.json`) that existing scanners (`trivy --vex`, Dependency-Track) consume to silence false positives automatically, plus an optional standalone **HTML audit report** (`--html`).
+   - The short list of hosts that are **truly affected**, the exact temporary mitigation commands (`ufw`, `sysctl`, `modprobe -r`, `systemctl`, or PowerShell `Set-ItemProperty` / `Stop-Service`) to run right now, live APT patch status on Linux (`apt-cache policy`; Windows KB status comes from the built-in spec, not a live query), and an optional **AI Operational Risk & Remediation Briefing** (`--ai-explain`).
+   - For every unaffected host, **`not_affected` with deterministic proof** (e.g. kernel module blocked from loading, service listening only on `127.0.0.1`, firewall default deny, or Windows Registry mitigation active).
+   - A standard **OpenVEX v0.2.0** file (`.vex.json`). Statements about an installed package carry its Package URL (e.g. `pkg:deb/ubuntu/openssh-server@9.6p1-3ubuntu13.3?epoch=1`), which is what `trivy --vex` matches on: as the product when the document covers one host, as a subcomponent of the host when it covers a fleet. For Trivy, emit one VEX document per host. Dependency-Track does not import OpenVEX yet ([DependencyTrack/dependency-track#7094](https://github.com/DependencyTrack/dependency-track/issues/7094)). An optional standalone **HTML audit report** (`--html`) is also available.
 
 ---
 
@@ -39,18 +39,20 @@ flowchart LR
 
 | Probe Type | OS | System Check | OpenVEX Justification (when `NOT_MET`) |
 |---|---|---|---|
-| `kernel_version_vulnerable` | Linux | `uname -r` + `dpkg --compare-versions` | `vulnerable_code_not_present` |
-| `package_installed_vulnerable` | Linux | `dpkg-query -W` + `dpkg --compare-versions` | `component_not_present` / `vulnerable_code_not_present` |
-| `kernel_module_loaded` | Linux | `/proc/modules` | `vulnerable_code_not_in_execute_path` |
+| `kernel_version_vulnerable` | Linux | `uname -r` + `dpkg --compare-versions`, only against fix data for the kernel's own track (line + flavour); a curated `mainline_from` line counts any kernel at or above it as fixed; other tracks are `UNKNOWN` | `vulnerable_code_not_present` |
+| `package_installed_vulnerable` | Linux | `dpkg-query -W` (`apk info` / `rpm -q` when dpkg is absent) + the host's comparator (`dpkg --compare-versions` / `apk version -t`), against the fix for the host's own distro release; no comparator (e.g. rpm hosts) or an unlisted release is `UNKNOWN` | `component_not_present` / `vulnerable_code_not_present` |
+| `kernel_module_loaded` | Linux | `/proc/modules`; "not loaded" counts only when loading is blocked (`modprobe -c` `install <mod> /bin/false`, or `kernel.modules_disabled=1`) | `vulnerable_code_not_in_execute_path` |
 | `sysctl_equals` | Linux | `sysctl -n <key>` | `inline_mitigations_already_exist` |
-| `network_listener` | Linux | `ss -tulpnH` (loopback `127.0.0.0/8`, `::1`, `%lo` vs public) | `vulnerable_code_not_in_execute_path` |
-| `firewall_allows_port` | Linux | `ufw status verbose` | `inline_mitigations_already_exist` |
-| `systemd_service_active` | Linux | `systemctl is-active <unit>` | `vulnerable_code_not_in_execute_path` |
+| `network_listener` | Linux | `ss -tulpnH` (loopback `127.0.0.0/8`, `::1`, `%lo` vs public); a process filter needs visible process names (root) | `vulnerable_code_not_in_execute_path` |
+| `firewall_allows_port` | Linux | `ufw status verbose` (ranges, lists, LIMIT; source-restricted rules, app profiles or a Docker bridge are `UNKNOWN`) | `inline_mitigations_already_exist` |
+| `systemd_service_active` | Linux | `systemctl is-active <unit>` + `LoadState` + its `.socket` unit | `vulnerable_code_not_in_execute_path` |
 | `process_running` | Linux / Windows | `ps -eo comm,args` / PowerShell `Get-Process` | `vulnerable_code_not_in_execute_path` |
-| `config_contains` | Linux | `cat <config_path>` (comment-aware regex match) | `inline_mitigations_already_exist` / `vulnerable_code_not_in_execute_path` |
+| `config_contains` | Linux | `cat <config_path>` (regex on lines that are not `#` / `;` comments; for sshd, `sshd -T` or the first occurrence of the directive) | `inline_mitigations_already_exist` / `vulnerable_code_not_in_execute_path` |
 | `windows_build_vulnerable` | Windows | PowerShell `Get-HotFix` + `CurrentBuildNumber.UBR` | `vulnerable_code_not_present` |
 | `windows_registry_equals` | Windows | PowerShell `Get-ItemProperty` (`HKLM:\` / `HKCU:\`) | `inline_mitigations_already_exist` |
 | `windows_service_active` | Windows | PowerShell `(Get-Service -Name <svc>).Status` | `vulnerable_code_not_in_execute_path` |
+
+The justification column shows the default per probe. Built-in specs set it per check; LLM-proposed checks always use the per-probe default, and their `NOT_MET` never yields `not_affected` on its own.
 
 ---
 
@@ -71,8 +73,9 @@ notaffected ui --port 8484
 ```
 From the Web Dashboard you can:
 - Auto-discover running Docker containers, load `inventory.yaml`, select a single custom Docker/SSH target, or inspect the simulated Linux + Windows Server fleet.
-- Run **Auto-Scan** (combines built-in rules + live OSV `/v1/querybatch` package queries + live CISA KEV actively exploited CVEs), check specific CVE IDs, or upload a **Trivy / Grype JSON report**.
-- Execute allowlisted temporary mitigations directly from the UI via **Run Mitigation** (with automatic host re-verification that flips `AFFECTED` rows to `NOT AFFECTED` live), reset the lab via **Reset Lab / Demo**, and download **OpenVEX v0.2.0 (`.vex.json`)**, **Audit JSON**, or a **Standalone HTML Report**.
+- Run **Auto-Scan** (combines built-in rules + live OSV `/v1/querybatch` queries for a fixed watch list of 7 packages, keeping up to 6 OSV CVEs, + up to 4 CISA KEV actively exploited CVEs), check specific CVE IDs, or upload a **Trivy / Grype JSON report**.
+- Try allowlisted temporary mitigations on the lab via **Run Mitigation**, reset the lab via **Reset Lab / Demo**, and download **OpenVEX v0.2.0 (`.vex.json`)**, **Audit JSON**, or a **Standalone HTML Report**. Run Mitigation works only on the simulated fleet (where the row flip is simulated) and on Docker containers labelled `notaffected.lab=true`; it refuses local and SSH hosts and any container without that label (also when it comes from an inventory file), because the tool's design is to never change real target hosts. Apply mitigations on real hosts yourself.
+- Every dashboard POST needs the per-process token embedded in the page, and `notaffected ui` refuses a non-loopback `--bind` unless you add `--allow-remote` (the dashboard can run probes over SSH with your keys).
 
 ### 2. Zero-Argument Auto-Scan & Fleet Initialization
 ```bash
@@ -106,7 +109,8 @@ notaffected check CVE-2024-6387 --docker lab-ssh-vuln --win-docker lab-win-dc01 
 ```bash
 notaffected filter examples/trivy-scan.json -i lab/inventory.yaml --emit-vex vex.json --html report.html
 
-# Feed the generated OpenVEX file back into Trivy to silence proven non-issues:
+# Feed the generated OpenVEX file back into Trivy to silence proven non-issues
+# (one host per VEX document, so package PURLs are the products Trivy matches):
 trivy rootfs --vex vex.json /
 ```
 

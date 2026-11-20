@@ -17,6 +17,39 @@ class ScannedFinding:
     installed_version: str | None = None
     fixed_version: str | None = None
     severity: str = "UNKNOWN"
+    package_class: str = "unknown"  # "os" | "lang" | "unknown"
+    purl: str | None = None
+
+
+# Trivy `Type` values for OS package databases (anything else with a Type is a language ecosystem).
+_TRIVY_OS_TYPES = frozenset(
+    {
+        "ubuntu", "debian", "alpine", "redhat", "centos", "rocky", "alma", "amazon", "oracle",
+        "suse", "opensuse", "opensuse.leap", "opensuse.tumbleweed", "sles", "photon", "fedora",
+        "wolfi", "chainguard", "cbl-mariner", "azurelinux", "echo", "minimos", "bottlerocket",
+    }
+)
+_OS_PURL_TYPES = ("pkg:deb/", "pkg:rpm/", "pkg:apk/")
+
+
+def _trivy_class(res_block: dict[str, Any]) -> str:
+    cls = str(res_block.get("Class") or "").lower()
+    if cls == "os-pkgs":
+        return "os"
+    if cls == "lang-pkgs":
+        return "lang"
+    typ = str(res_block.get("Type") or "").lower()
+    if not typ:
+        return "unknown"
+    return "os" if typ in _TRIVY_OS_TYPES else "lang"
+
+
+def _grype_class(artifact: dict[str, Any]) -> str:
+    typ = str(artifact.get("type") or "").lower()
+    purl = str(artifact.get("purl") or "").lower()
+    if typ in ("deb", "rpm", "apk") or purl.startswith(_OS_PURL_TYPES):
+        return "os"
+    return "lang" if typ or purl else "unknown"
 
 
 def parse_scanner_json(data: dict[str, Any] | str | Path) -> list[ScannedFinding]:
@@ -51,6 +84,7 @@ def parse_scanner_json(data: dict[str, Any] | str | Path) -> list[ScannedFinding
         for res_block in payload["Results"]:
             if not isinstance(res_block, dict):
                 continue
+            block_class = _trivy_class(res_block)
             for vuln in res_block.get("Vulnerabilities") or []:
                 if not isinstance(vuln, dict):
                     continue
@@ -73,6 +107,8 @@ def parse_scanner_json(data: dict[str, Any] | str | Path) -> list[ScannedFinding
                             str(vuln["FixedVersion"]) if vuln.get("FixedVersion") else None
                         ),
                         severity=str(vuln.get("Severity") or "UNKNOWN").upper(),
+                        package_class=block_class,
+                        purl=str((vuln.get("PkgIdentifier") or {}).get("PURL") or "") or None,
                     )
                 )
 
@@ -114,6 +150,8 @@ def parse_scanner_json(data: dict[str, Any] | str | Path) -> list[ScannedFinding
                     ),
                     fixed_version=fixed_ver,
                     severity=str(vuln.get("severity") or "UNKNOWN").upper(),
+                    package_class=_grype_class(artifact),
+                    purl=str(artifact.get("purl") or "") or None,
                 )
             )
 

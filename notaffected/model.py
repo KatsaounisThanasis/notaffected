@@ -57,6 +57,19 @@ PROBE_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# Where a precondition came from. "curated" = built-in or user-authored spec, "osv" = structured
+# OSV/USN version data, "scanner" = a scanner finding's package hint, "heuristic" = keyword rules
+# over advisory text, "llm" = proposed by the optional LLM extractor.
+PRECONDITION_ORIGINS: frozenset[str] = frozenset({"curated", "osv", "scanner", "heuristic", "llm"})
+
+# A NOT_MET from these origins is never proof on its own (design anti-goals: AI deciding the
+# verdict, false not_affected on uncertainty).
+NON_AUTHORITATIVE_ORIGINS: frozenset[str] = frozenset({"heuristic", "llm"})
+
+# Where a CheckSpec's OS family came from. Only "curated" and "structured" may short-circuit
+# an OS mismatch to not_affected.
+OS_SOURCES: frozenset[str] = frozenset({"curated", "structured", "heuristic"})
+
 
 @dataclass(frozen=True)
 class Precondition:
@@ -68,11 +81,16 @@ class Precondition:
     justification_if_not_met: VexJustification = (
         VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH
     )
+    origin: str = "curated"
 
     def __post_init__(self) -> None:
         if self.probe not in PROBE_TYPES:
             raise ValueError(
                 f"Unsupported probe type '{self.probe}'. Must be one of {sorted(PROBE_TYPES)}"
+            )
+        if self.origin not in PRECONDITION_ORIGINS:
+            raise ValueError(
+                f"Unsupported precondition origin '{self.origin}'. Must be one of {sorted(PRECONDITION_ORIGINS)}"
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -81,6 +99,7 @@ class Precondition:
             "params": dict(self.params),
             "description": self.description,
             "justification_if_not_met": self.justification_if_not_met.value,
+            "origin": self.origin,
         }
 
     @classmethod
@@ -94,6 +113,7 @@ class Precondition:
             params=dict(data.get("params") or {}),
             description=str(data.get("description") or ""),
             justification_if_not_met=VexJustification(just_raw),
+            origin=str(data.get("origin") or "curated"),
         )
 
 
@@ -139,6 +159,7 @@ class CheckSpec:
     confidence: str = "high"  # "high" | "low"
     source: str = "builtin"  # "builtin" | "osv" | "osv+llm" | "fallback"
     os_family: str = "linux"  # "linux" | "windows"
+    os_source: str = "curated"  # one of OS_SOURCES
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -151,6 +172,7 @@ class CheckSpec:
             "confidence": self.confidence,
             "source": self.source,
             "os_family": self.os_family,
+            "os_source": self.os_source,
         }
 
     @classmethod
@@ -167,6 +189,7 @@ class CheckSpec:
             confidence=str(data.get("confidence") or "high"),
             source=str(data.get("source") or "builtin"),
             os_family=str(data.get("os_family") or "linux").lower(),
+            os_source=str(data.get("os_source") or "curated").lower(),
         )
 
 
@@ -178,6 +201,8 @@ class ProbeResult:
     status: ProbeStatus
     evidence: str
     command: str
+    # Structured facts a probe observed (e.g. the installed package name/version for a PURL).
+    facts: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -185,6 +210,7 @@ class ProbeResult:
             "status": self.status.value,
             "evidence": self.evidence,
             "command": self.command,
+            "facts": dict(self.facts),
         }
 
 
@@ -202,6 +228,7 @@ class HostVerdict:
     patch: PatchInfo | None = None
     product_id: str = ""
     os_family: str = "linux"
+    component_purl: str | None = None
 
     def __post_init__(self) -> None:
         if not self.product_id:
@@ -220,4 +247,5 @@ class HostVerdict:
             "patch": self.patch.to_dict() if self.patch else None,
             "product_id": self.product_id,
             "os_family": self.os_family,
+            "component_purl": self.component_purl,
         }

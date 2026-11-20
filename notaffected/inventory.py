@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from notaffected.engine.evaluator import ensure_unique_host_names
 from notaffected.probes.runner import (
     CommandResult,
     DockerRunner,
@@ -32,6 +33,8 @@ def load_demo_fleet() -> list[HostRunner]:
         host_name="dev-laptop-01",
         simulate_dpkg_db=True,
         responses={
+            ("uname", "-s"): CommandResult(0, "Linux\n", ""),
+            ("cat", "/etc/os-release"): CommandResult(0, 'ID=ubuntu\nVERSION_ID="24.04"\n', ""),
             ("uname", "-r"): CommandResult(0, "6.8.0-40-generic\n", ""),
             ("dpkg", "--compare-versions", "6.8.0-40", "lt", "4.4.0"): CommandResult(1, "", ""),
             ("dpkg", "--compare-versions", "6.8.0-40", "lt", "6.8.0-45"): CommandResult(0, "", ""),
@@ -55,6 +58,9 @@ def load_demo_fleet() -> list[HostRunner]:
             ("ps", "-eo", "comm,args", "--no-headers"): CommandResult(0, "systemd /sbin/init\n", ""),
             ("cat", "/etc/ssh/sshd_config"): CommandResult(1, "", "cat: /etc/ssh/sshd_config: No such file or directory"),
             ("systemctl", "is-active", "cups-browsed.service"): CommandResult(3, "inactive\n", ""),
+            ("systemctl", "show", "-p", "LoadState", "--value", "cups-browsed.service"): CommandResult(
+                0, "loaded\n", ""
+            ),
             ("ss", "-tulpnH"): CommandResult(
                 0,
                 "udp UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:*\n"
@@ -72,6 +78,8 @@ def load_demo_fleet() -> list[HostRunner]:
         host_name="prod-edge-api-01",
         simulate_dpkg_db=True,
         responses={
+            ("uname", "-s"): CommandResult(0, "Linux\n", ""),
+            ("cat", "/etc/os-release"): CommandResult(0, 'ID=ubuntu\nVERSION_ID="24.04"\n', ""),
             ("uname", "-r"): CommandResult(0, "6.8.0-40-generic\n", ""),
             ("dpkg", "--compare-versions", "6.8.0-40", "lt", "4.4.0"): CommandResult(1, "", ""),
             ("dpkg", "--compare-versions", "6.8.0-40", "lt", "6.8.0-45"): CommandResult(0, "", ""),
@@ -121,6 +129,8 @@ def load_demo_fleet() -> list[HostRunner]:
         host_name="prod-db-01",
         simulate_dpkg_db=True,
         responses={
+            ("uname", "-s"): CommandResult(0, "Linux\n", ""),
+            ("cat", "/etc/os-release"): CommandResult(0, 'ID=ubuntu\nVERSION_ID="24.04"\n', ""),
             ("uname", "-r"): CommandResult(0, "6.8.0-45-generic\n", ""),
             ("dpkg", "--compare-versions", "6.8.0-45", "lt", "4.4.0"): CommandResult(1, "", ""),
             ("dpkg", "--compare-versions", "6.8.0-45", "lt", "6.8.0-45"): CommandResult(1, "", ""),
@@ -327,6 +337,7 @@ def load_runners(
     if not runners:
         runners.append(LocalRunner(timeout=timeout))
 
+    ensure_unique_host_names(runners)  # fail early with a clear CLI error, before any probe runs
     return runners
 
 

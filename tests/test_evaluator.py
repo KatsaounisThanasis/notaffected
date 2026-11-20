@@ -8,6 +8,7 @@ from notaffected.model import (
     VerdictStatus,
     VexJustification,
 )
+from notaffected.probes.primitives import WIN_BUILD_ARGV
 from notaffected.probes.runner import CommandResult, MockRunner
 
 
@@ -166,7 +167,11 @@ def test_evaluate_fleet_preserves_order():
 def test_os_mismatch_short_circuits_to_not_affected():
     linux_spec = _make_cve_spec()
     assert linux_spec.os_family == "linux"
-    win_runner = MockRunner(host_name="win-srv-01", responses={}, os_family="windows")
+    win_runner = MockRunner(
+        host_name="win-srv-01",
+        responses={tuple(WIN_BUILD_ARGV): CommandResult(0, "BUILD=20348.1|KBS=\n", "")},
+        os_family="windows",
+    )
     verdict = evaluate_host(linux_spec, win_runner)
     assert verdict.status == VerdictStatus.NOT_AFFECTED
     assert verdict.justification == VexJustification.COMPONENT_NOT_PRESENT
@@ -174,3 +179,63 @@ def test_os_mismatch_short_circuits_to_not_affected():
     assert verdict.product_id == "pkg:generic/windows-host@win-srv-01"
     assert verdict.probe_results == []
 
+
+
+def test_os_mismatch_needs_probe_confirmation_and_non_heuristic_os_source():
+    linux_spec = _make_cve_spec()
+    # Unconfirmed: the declared Windows host does not answer the Windows build probe
+    # (e.g. a Linux container named "app-win-gateway" declared Windows by its name).
+    fake_win = MockRunner(host_name="app-win-gateway", responses={}, os_family="windows")
+    v = evaluate_host(linux_spec, fake_win)
+    assert v.status == VerdictStatus.UNDER_INVESTIGATION
+    assert "could not be confirmed" in v.reason
+
+    # Heuristic OS source never short-circuits, even on a confirmed host.
+    win_spec = CheckSpec(cve_id="CVE-2026-0002", summary="s", os_family="windows", os_source="heuristic")
+    linux_host = MockRunner(
+        host_name="lin-01", responses={("uname", "-s"): CommandResult(0, "Linux\n", "")}, os_family="linux"
+    )
+    v = evaluate_host(win_spec, linux_host)
+    assert v.status == VerdictStatus.UNDER_INVESTIGATION
+    assert "heuristics" in v.reason
+
+    # Structured OS source + confirmed host keeps the short-circuit.
+    win_spec.os_source = "structured"
+    assert evaluate_host(win_spec, linux_host).status == VerdictStatus.NOT_AFFECTED
+
+
+def test_not_met_from_non_authoritative_origin_is_not_proof():
+    def spec_with(origin: str) -> CheckSpec:
+        return CheckSpec(
+            cve_id="CVE-2026-0003",
+            summary="s",
+            preconditions=[
+                Precondition("sysctl_equals", {"key": "net.x", "value": "1"}, "x on", origin=origin),
+            ],
+        )
+
+    runner = MockRunner(host_name="h", responses={("sysctl", "-n", "net.x"): CommandResult(0, "0\n", "")})
+    for origin in ("llm", "heuristic"):
+        v = evaluate_host(spec_with(origin), runner)
+        assert v.status == VerdictStatus.UNDER_INVESTIGATION, origin
+        assert v.reason.startswith("Only heuristic/LLM-proposed checks were NOT_MET")
+    for origin in ("curated", "osv", "scanner"):
+        assert evaluate_host(spec_with(origin), runner).status == VerdictStatus.NOT_AFFECTED, origin
+
+
+def test_windows_confirmation_needs_a_real_build_number():
+    spec = _make_cve_spec()
+    empty_build = MockRunner(
+        host_name="app-win-gateway",
+        responses={tuple(WIN_BUILD_ARGV): CommandResult(0, "BUILD=.|KBS=\n", "")},
+        os_family="windows",
+    )
+    assert evaluate_host(spec, empty_build).status == VerdictStatus.UNDER_INVESTIGATION
+
+
+def test_fleet_with_duplicate_host_names_is_refused():
+    import pytest
+
+    spec = _make_cve_spec()
+    with pytest.raises(ValueError, match="web"):
+        evaluate_fleet([spec], [MockRunner("web", {}), MockRunner("web", {})])

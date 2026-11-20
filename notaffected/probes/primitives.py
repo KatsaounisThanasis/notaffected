@@ -8,9 +8,20 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from dataclasses import replace
+from typing import NamedTuple
 
 from notaffected.model import Precondition, ProbeResult, ProbeStatus
 from notaffected.probes.runner import HostRunner
+
+WIN_BUILD_PS_SCRIPT = (
+    "$cv = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'; "
+    "$build = \"$($cv.CurrentBuildNumber).$($cv.UBR)\"; "
+    "$kbs = @(Get-HotFix -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HotFixID) -join ','; "
+    "Write-Output \"BUILD=$build|KBS=$kbs\""
+)
+# Read-only Windows build/KB query. Also used by the evaluator to confirm a host really is Windows.
+WIN_BUILD_ARGV: list[str] = ["powershell", "-NoProfile", "-NonInteractive", "-Command", WIN_BUILD_PS_SCRIPT]
 
 
 def run_probe(precondition: Precondition, runner: HostRunner) -> ProbeResult:
@@ -37,27 +48,61 @@ def run_probe(precondition: Precondition, runner: HostRunner) -> ProbeResult:
             evidence=f"Unknown probe type: {precondition.probe}",
             command="",
         )
-    return handler(precondition, runner)
+    try:
+        return handler(precondition, runner)
+    except Exception as exc:  # noqa: BLE001 - any probe/transport crash must resolve to UNKNOWN
+        return ProbeResult(
+            precondition=precondition,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Probe {precondition.probe} failed: {type(exc).__name__}: {exc}",
+            command="",
+        )
 
 
 def _normalize_kernel_release(uname_r: str) -> str:
-    """Strip flavor suffixes like '-generic', '-aws', '-azure' and Ubuntu '.upload~backport' tags."""
+    """Reduce a kernel release to 'X.Y.Z-ABI' for comparison: drop '~backport' tags, any
+    flavour suffix ('-generic', '-azure-fde', ...) and the Ubuntu upload number ('.111')."""
     cleaned = uname_r.strip()
     cleaned = re.sub(r"~.*$", "", cleaned)
-    cleaned = re.sub(
-        r"-(generic|lowlatency|aws|azure|gcp|kvm|virtual|oem|raspi|server).*$",
-        "",
-        cleaned,
-    )
+    cleaned = re.sub(r"^(\d+\.\d+\.\d+-\d+)-[a-z].*$", r"\1", cleaned)
     cleaned = re.sub(r"^(\d+\.\d+\.\d+-\d+)\.\d+.*$", r"\1", cleaned)
     return cleaned
 
 
+def _kernel_track(uname_r: str) -> tuple[str, str]:
+    """(line, flavour) of a kernel release: '6.5.0-14-generic' -> ('6.5', 'generic').
+
+    The flavour is the Ubuntu/Debian-style suffix after the ABI number; it is '' for kernels
+    without one (RHEL, Fedora, Arch), whose build numbers are not comparable with Ubuntu's.
+    """
+    r = uname_r.strip()
+    m_line = re.match(r"^(\d+)\.(\d+)", r)
+    line = f"{m_line.group(1)}.{m_line.group(2)}" if m_line else ""
+    m_flav = re.match(r"^\d+\.\d+\.\d+-\d+(?:\.\d+)*-([a-z][a-z0-9-]*)$", r)
+    return line, (m_flav.group(1) if m_flav else "")
+
+
+def _line_tuple(line: str) -> tuple[int, int] | None:
+    m = re.match(r"^(\d+)\.(\d+)", line.strip())
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+# Flavours that share Ubuntu's generic ABI numbering, so a legacy single fixed_version applies.
+_GENERIC_KERNEL_FLAVOURS = frozenset({"generic", "lowlatency"})
+
+
 def _probe_kernel_version(pre: Precondition, runner: HostRunner) -> ProbeResult:
+    """Compare the running kernel only against fix data for its own track (line + flavour).
+
+    Decision order: (1) a curated `mainline_from` line at or below the host's line means the
+    upstream fix is in it; (2) `track_fixes` keyed 'ubuntu:<release>:<line>:<flavour>';
+    (3) a legacy `fixed_version` on the same line, generic flavour only; otherwise UNKNOWN.
+    """
     fixed_version = str(pre.params.get("fixed_version") or "").strip()
     min_version = str(pre.params.get("min_version") or "").strip()
-    cmd = ["uname", "-r"]
-    res = runner.run(cmd)
+    mainline_from = str(pre.params.get("mainline_from") or "").strip()
+    track_fixes = pre.params.get("track_fixes") if isinstance(pre.params.get("track_fixes"), dict) else {}
+    res = runner.run(["uname", "-r"])
     if res.transport_error or res.returncode != 0 or not res.stdout.strip():
         return ProbeResult(
             precondition=pre,
@@ -68,34 +113,96 @@ def _probe_kernel_version(pre: Precondition, runner: HostRunner) -> ProbeResult:
 
     running_raw = res.stdout.strip()
     running_norm = _normalize_kernel_release(running_raw)
-    fixed_norm = _normalize_kernel_release(fixed_version) if fixed_version else ""
+    line, flavour = _kernel_track(running_raw)
+    host_line = _line_tuple(line)
+    if host_line is None:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Unreadable kernel release '{running_raw}'",
+            command="uname -r",
+        )
 
-    if min_version:
-        min_norm = _normalize_kernel_release(min_version)
-        cmp_min = runner.run(["dpkg", "--compare-versions", running_norm, "lt", min_norm])
-        if cmp_min.transport_error:
+    def _compare(fixed: str, label: str) -> ProbeResult:
+        fixed_norm = _normalize_kernel_release(fixed)
+        is_vuln = _compare_lt(runner, running_norm, fixed_norm)
+        if is_vuln is None:
             return ProbeResult(
                 precondition=pre,
                 status=ProbeStatus.UNKNOWN,
-                evidence=f"Transport error comparing minimum kernel version: {cmp_min.stderr.strip()}",
-                command=f"dpkg --compare-versions {running_norm} lt {min_norm}",
+                evidence=f"Could not compare kernel version '{running_raw}' with fixed version '{fixed}'",
+                command=f"dpkg --compare-versions {running_norm} lt {fixed_norm}",
             )
-        if cmp_min.returncode == 0:
+        if is_vuln:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.MET,
+                evidence=f"Running kernel '{running_raw}' (< '{fixed}'{label}) is in vulnerable range",
+                command="uname -r",
+            )
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.NOT_MET,
+            evidence=f"Running kernel '{running_raw}' is >= fixed version '{fixed}'{label}",
+            command="uname -r",
+        )
+
+    if min_version:
+        min_line = _line_tuple(min_version)
+        if min_line is None:
+            older: bool | None = None
+        elif host_line != min_line:
+            older = host_line < min_line  # line order is real version order
+        else:
+            older = _compare_lt(runner, running_norm, _normalize_kernel_release(min_version))
+        if older is None:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=f"Could not compare kernel version '{running_raw}' with minimum '{min_version}'",
+                command="uname -r",
+            )
+        if older:
             return ProbeResult(
                 precondition=pre,
                 status=ProbeStatus.NOT_MET,
                 evidence=f"Running kernel '{running_raw}' is older than minimum affected version '{min_version}'",
                 command="uname -r",
             )
-        if cmp_min.returncode not in (0, 1, 127):
-            return ProbeResult(
-                precondition=pre,
-                status=ProbeStatus.UNKNOWN,
-                evidence=f"Could not compare kernel version '{running_norm}' with '{min_norm}': {cmp_min.stderr.strip()}",
-                command=f"dpkg --compare-versions {running_norm} lt {min_norm}",
-            )
 
-    if not fixed_norm:
+    mainline = _line_tuple(mainline_from) if mainline_from else None
+    if mainline is not None and host_line >= mainline:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.NOT_MET,
+            evidence=(
+                f"Running kernel '{running_raw}' is on line {line}, which includes the upstream fix "
+                f"(mainline since {mainline_from})"
+            ),
+            command="uname -r",
+        )
+
+    if track_fixes:
+        distro_id, ver_id = _read_os_release(runner)
+        key = f"{distro_id}:{ver_id}:{line}:{flavour}"
+        if distro_id and ver_id and flavour and key in track_fixes:
+            fixed = str(track_fixes[key] or "")
+            if not fixed:
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.MET,
+                    evidence=f"Running kernel '{running_raw}': track '{key}' is listed as affected with no fix",
+                    command="uname -r",
+                )
+            return _compare(fixed, f" for track '{key}'")
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"No fix data for kernel track '{key}' (running '{running_raw}')",
+            command="uname -r",
+        )
+
+    if not fixed_version:
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.MET,
@@ -103,47 +210,59 @@ def _probe_kernel_version(pre: Precondition, runner: HostRunner) -> ProbeResult:
             command="uname -r",
         )
 
-    cmp_res = runner.run(["dpkg", "--compare-versions", running_norm, "lt", fixed_norm])
-    if cmp_res.transport_error:
-        return ProbeResult(
-            precondition=pre,
-            status=ProbeStatus.UNKNOWN,
-            evidence=f"Transport error comparing kernel versions: {cmp_res.stderr.strip()}",
-            command=f"dpkg --compare-versions {running_norm} lt {fixed_norm}",
-        )
-    if cmp_res.returncode == 127:
-        # Fallback tuple comparison if dpkg is unavailable on a non-Debian Linux host
-        is_vuln = _fallback_version_lt(running_norm, fixed_norm)
-    elif cmp_res.returncode in (0, 1):
-        is_vuln = cmp_res.returncode == 0
-    else:
-        return ProbeResult(
-            precondition=pre,
-            status=ProbeStatus.UNKNOWN,
-            evidence=f"Invalid version comparison ('{running_norm}' vs '{fixed_norm}'): {cmp_res.stderr.strip()}",
-            command=f"dpkg --compare-versions {running_norm} lt {fixed_norm}",
-        )
-
-    if is_vuln:
-        return ProbeResult(
-            precondition=pre,
-            status=ProbeStatus.MET,
-            evidence=f"Running kernel '{running_raw}' (< '{fixed_version}') is in vulnerable range",
-            command="uname -r",
-        )
+    fixed_line = _line_tuple(fixed_version)
+    if fixed_line == host_line and flavour in _GENERIC_KERNEL_FLAVOURS:
+        return _compare(fixed_version, "")
     return ProbeResult(
         precondition=pre,
-        status=ProbeStatus.NOT_MET,
-        evidence=f"Running kernel '{running_raw}' is >= fixed version '{fixed_version}'",
+        status=ProbeStatus.UNKNOWN,
+        evidence=(
+            f"No fix data for kernel track {line}/{flavour or 'unknown flavour'} "
+            f"(running '{running_raw}', fix '{fixed_version}' is for line "
+            f"{'.'.join(map(str, fixed_line)) if fixed_line else 'unknown'} generic)"
+        ),
         command="uname -r",
     )
 
 
-def _fallback_version_lt(v1: str, v2: str) -> bool:
-    def parts(v: str) -> list[int]:
-        return [int(x) for x in re.findall(r"\d+", v)]
+def _compare_lt(runner: HostRunner, a: str, b: str) -> bool | None:
+    """True if version `a` < `b` per the host's `dpkg --compare-versions`; None when it cannot tell.
 
-    return parts(v1) < parts(v2)
+    None covers a transport error, a missing dpkg (rc 127, e.g. rpm hosts), any rc other than 0/1,
+    and any stderr output: dpkg's "bad syntax" warning comes with rc 1 for an unreadable version (which
+    must not read as "patched") and is translated per locale, so no particular wording is relied on.
+    There is deliberately no digit-list fallback: it mis-orders epochs, letters and distro suffixes.
+    """
+    res = runner.run(["dpkg", "--compare-versions", a, "lt", b])
+    if res.transport_error or res.returncode not in (0, 1) or res.stderr.strip():
+        return None
+    return res.returncode == 0
+
+
+def _dpkg_status_installed(status_abbrev: str) -> bool:
+    """dpkg `${db:Status-Abbrev}` is desired/status/error; files are on disk unless status is n or c."""
+    status = status_abbrev[1:2]
+    return bool(status) and status not in ("n", "c")
+
+
+def _read_os_release(runner: HostRunner) -> tuple[str, str]:
+    """(ID, VERSION_ID) from /etc/os-release, lowercased; Alpine VERSION_ID cut to major.minor.
+    Empty strings when the file cannot be read."""
+    res = runner.run(["cat", "/etc/os-release"])
+    if res.transport_error or res.returncode != 0 or not res.stdout:
+        return "", ""
+    distro_id = ""
+    ver_id = ""
+    for line in res.stdout.splitlines():
+        if line.startswith("ID="):
+            distro_id = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+        elif line.startswith("VERSION_ID="):
+            ver_id = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
+    if distro_id == "alpine" and ver_id:
+        parts = ver_id.split(".")
+        if len(parts) >= 2:
+            ver_id = f"{parts[0]}.{parts[1]}"
+    return distro_id, ver_id
 
 
 def _resolve_host_release_fix(
@@ -151,67 +270,95 @@ def _resolve_host_release_fix(
     release_fixes: object,
     installed_ver: str,
     default_fix: str,
-) -> str:
-    """Select the distro-release-specific fixed version (e.g. ubuntu:22.04 vs ubuntu:24.04)."""
+) -> tuple[str, str] | None:
+    """Pick the fix for the host's own distro release.
+
+    Returns (fixed_version, host_release_key); fixed_version "" means the release is listed as
+    affected with no fix yet. Without per-release data the default fix applies (key ""). When
+    per-release data exists but the host's release is not in it, returns None: another release's
+    fix must never be borrowed.
+    """
     if not isinstance(release_fixes, dict) or not release_fixes:
-        return default_fix
+        return default_fix, ""
     m_tilde = re.search(r"~(\d{2}\.\d{2})\b", installed_ver)
     if m_tilde:
         k = f"ubuntu:{m_tilde.group(1)}"
         if k in release_fixes:
-            return str(release_fixes[k])
-    os_res = runner.run(["cat", "/etc/os-release"])
-    if not os_res.transport_error and os_res.returncode == 0 and os_res.stdout:
-        distro_id = ""
-        ver_id = ""
-        for line in os_res.stdout.splitlines():
-            if line.startswith("ID="):
-                distro_id = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
-            elif line.startswith("VERSION_ID="):
-                ver_id = line.split("=", 1)[1].strip().strip('"').strip("'").lower()
-        if distro_id == "alpine" and ver_id:
-            parts = ver_id.split(".")
-            if len(parts) >= 2:
-                ver_id = f"{parts[0]}.{parts[1]}"
-        if distro_id and ver_id:
-            key = f"{distro_id}:{ver_id}"
-            if key in release_fixes:
-                return str(release_fixes[key])
-    return default_fix
+            return str(release_fixes[k] or ""), k
+    distro_id, ver_id = _read_os_release(runner)
+    key = f"{distro_id}:{ver_id}" if distro_id and ver_id else ""
+    if key and key in release_fixes:
+        return str(release_fixes[key] or ""), key
+    return None
+
+
+def _release_not_covered(pre: Precondition, runner: HostRunner, release_fixes: object, cmd_str: str) -> ProbeResult | None:
+    """UNKNOWN result when per-release fix data exists but does not cover this host's release."""
+    if not isinstance(release_fixes, dict) or not release_fixes:
+        return None
+    distro_id, ver_id = _read_os_release(runner)
+    key = f"{distro_id}:{ver_id}" if distro_id and ver_id else ""
+    if key in release_fixes:
+        return None
+    return ProbeResult(
+        precondition=pre,
+        status=ProbeStatus.UNKNOWN,
+        evidence=(
+            f"No fix data for host release '{key or 'unknown'}' (advisory lists: {', '.join(sorted(release_fixes))}); "
+            "package names and fixes differ across releases"
+        ),
+        command=cmd_str,
+    )
 
 
 def _try_apk_or_rpm_package(
     pkg: str, runner: HostRunner
 ) -> tuple[str | None, str | None, str] | None:
     """Fallback package lookup for Alpine (`apk`) and RHEL/Rocky/Alma/Fedora (`rpm`) hosts."""
-    mock_resps = getattr(runner, "responses", None)
-    apk_cmd = ("apk", "info", "-e", "-v", pkg)
-    rpm_cmd = ("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\\n", pkg)
+    # rc 127 means the tool is absent on this host: try the next package manager.
+    apk_res = runner.run(["apk", "info", "-e", "-v", pkg])
+    if not apk_res.transport_error and apk_res.returncode != 127:
+        if apk_res.returncode != 0 or not apk_res.stdout.strip():
+            return ("absent", "", f"apk info -e -v {pkg}")
+        first = apk_res.stdout.strip().splitlines()[0].strip()
+        prefix = f"{pkg}-"
+        ver = first[len(prefix):] if first.startswith(prefix) else first
+        return ("ii", ver, f"apk info -e -v {pkg}")
 
-    if mock_resps is None or apk_cmd in mock_resps:
-        apk_res = runner.run(list(apk_cmd))
-        if not apk_res.transport_error and apk_res.returncode != 127 and "unmocked command" not in apk_res.stderr.lower():
-            if apk_res.returncode != 0 or not apk_res.stdout.strip():
-                return ("absent", "", f"apk info -e -v {pkg}")
-            first = apk_res.stdout.strip().splitlines()[0].strip()
-            prefix = f"{pkg}-"
-            ver = first[len(prefix):] if first.startswith(prefix) else first
-            return ("ii", ver, f"apk info -e -v {pkg}")
-
-    if mock_resps is None or rpm_cmd in mock_resps:
-        rpm_res = runner.run(list(rpm_cmd))
-        if not rpm_res.transport_error and rpm_res.returncode != 127 and "unmocked command" not in rpm_res.stderr.lower():
-            if rpm_res.returncode != 0 or not rpm_res.stdout.strip():
-                if rpm_res.returncode == 1 or "not installed" in (rpm_res.stdout + rpm_res.stderr).lower():
-                    return ("absent", "", f"rpm -q {pkg}")
-                return None
-            first = rpm_res.stdout.strip().splitlines()[0].strip()
-            return ("ii", first, f"rpm -q {pkg}")
+    rpm_res = runner.run(["rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\\n", pkg])
+    if not rpm_res.transport_error and rpm_res.returncode != 127:
+        if rpm_res.returncode != 0 or not rpm_res.stdout.strip():
+            if rpm_res.returncode == 1 or "not installed" in (rpm_res.stdout + rpm_res.stderr).lower():
+                return ("absent", "", f"rpm -q {pkg}")
+            return None
+        first = rpm_res.stdout.strip().splitlines()[0].strip()
+        return ("ii", first, f"rpm -q {pkg}")
 
     return None
 
 
 def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResult:
+    """Package probe; whenever the package is found installed, the result carries its facts
+    (type/namespace/name/version/epoch) so the verdict can name it by PURL in VEX."""
+    facts: dict[str, str] = {}
+    result = _package_probe_core(pre, runner, facts)
+    return replace(result, facts=facts) if facts else result
+
+
+def _record_package_facts(facts: dict[str, str], runner: HostRunner, purl_type: str, name: str, version: str) -> None:
+    m_epoch = re.match(r"^(\d+):(.+)$", version)
+    facts.update(
+        {
+            "purl_type": purl_type,
+            "name": name,
+            "version": m_epoch.group(2) if m_epoch else version,
+            "epoch": m_epoch.group(1) if m_epoch else "",
+            "namespace": _read_os_release(runner)[0],
+        }
+    )
+
+
+def _package_probe_core(pre: Precondition, runner: HostRunner, facts: dict[str, str]) -> ProbeResult:
     pkg = str(pre.params.get("package") or "").strip()
     fixed_version = str(pre.params.get("fixed_version") or "").strip()
     release_fixes = pre.params.get("release_fixes")
@@ -235,6 +382,8 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
         )
 
     pkg_display = pkg
+    matched_bin = ""
+    matched_bin_ver = ""
     if res.returncode != 0:
         stderr_lower = res.stderr.lower()
         if "no packages found" in stderr_lower or (res.returncode == 1 and not stderr_lower.strip()):
@@ -245,19 +394,28 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
                     "-f=${db:Status-Abbrev}\\t${binary:Package}\\t${source:Package}\\t${Version}\\t${source:Version}\\n",
                 ]
             )
-            matched_bin = ""
             matched_ver = ""
-            if not src_res.transport_error and src_res.returncode == 0 and src_res.stdout:
-                candidates: list[tuple[str, str]] = []
+            if src_res.transport_error or src_res.returncode != 0:
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.UNKNOWN,
+                    evidence=(
+                        f"Package '{pkg}' not found by name and the source-package listing failed: "
+                        f"{src_res.stderr.strip() or f'exit {src_res.returncode}'}"
+                    ),
+                    command=cmd_str,
+                )
+            if src_res.stdout:
+                candidates: list[tuple[str, str, str]] = []
                 for sline in src_res.stdout.splitlines():
                     sparts = sline.split("\t")
-                    if len(sparts) >= 4 and sparts[0].strip().startswith("ii"):
+                    if len(sparts) >= 4 and _dpkg_status_installed(sparts[0]):
                         bin_name = sparts[1].strip().split(":")[0]
                         src_name = sparts[2].strip().split(" ")[0]
                         bin_ver = sparts[3].strip()
                         src_ver = sparts[4].strip() if len(sparts) > 4 else ""
                         if src_name == pkg:
-                            candidates.append((bin_name, src_ver or bin_ver))
+                            candidates.append((bin_name, src_ver or bin_ver, bin_ver))
                 if candidates:
                     preferred = next(
                         (
@@ -267,12 +425,15 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
                         ),
                         candidates[0],
                     )
-                    matched_bin, matched_ver = preferred
+                    matched_bin, matched_ver, matched_bin_ver = preferred
             if matched_bin and matched_ver:
                 status_abbrev = "ii"
                 installed_ver = matched_ver
                 pkg_display = f"{pkg} (binary: {matched_bin})"
             else:
+                gate = _release_not_covered(pre, runner, release_fixes, cmd_str)
+                if gate is not None:
+                    return gate
                 return ProbeResult(
                     precondition=pre,
                     status=ProbeStatus.NOT_MET,
@@ -285,6 +446,9 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
                 alt_status, alt_ver, alt_cmd = alt
                 cmd_str = alt_cmd
                 if alt_status != "ii":
+                    gate = _release_not_covered(pre, runner, release_fixes, cmd_str)
+                    if gate is not None:
+                        return gate
                     mgr = "apk info" if alt_cmd.startswith("apk") else "rpm -q"
                     return ProbeResult(
                         precondition=pre,
@@ -314,7 +478,10 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
         status_abbrev = parts[0].strip() if parts else ""
         installed_ver = parts[1].strip() if len(parts) > 1 else ""
 
-    if not status_abbrev.startswith("ii"):
+    if not _dpkg_status_installed(status_abbrev):
+        gate = _release_not_covered(pre, runner, release_fixes, cmd_str)
+        if gate is not None:
+            return gate
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.NOT_MET,
@@ -322,9 +489,30 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
             command=cmd_str,
         )
 
-    fixed_version = _resolve_host_release_fix(
-        runner, release_fixes, installed_ver, fixed_version
-    )
+    purl_type = "apk" if cmd_str.startswith("apk ") else "rpm" if cmd_str.startswith("rpm ") else "deb"
+    _record_package_facts(facts, runner, purl_type, matched_bin or pkg, matched_bin_ver or installed_ver)
+
+    resolved = _resolve_host_release_fix(runner, release_fixes, installed_ver, fixed_version)
+    if resolved is None:
+        gate = _release_not_covered(pre, runner, release_fixes, cmd_str)
+        return gate or ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"No fix data for this host's release for '{pkg_display}'",
+            command=cmd_str,
+        )
+    fixed_version, release_key = resolved
+
+    if not fixed_version and release_key:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.MET,
+            evidence=(
+                f"Package '{pkg_display}' is installed at version '{installed_ver}'; "
+                f"release '{release_key}' is listed as affected with no fix"
+            ),
+            command=cmd_str,
+        )
 
     if not fixed_version:
         return ProbeResult(
@@ -336,37 +524,30 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
 
     if cmd_str.startswith("apk "):
         apk_cmp = runner.run(["apk", "version", "-t", installed_ver, fixed_version])
-        if apk_cmp.transport_error:
+        if apk_cmp.transport_error or apk_cmp.returncode != 0 or apk_cmp.stdout.strip() not in ("<", "=", ">"):
             return ProbeResult(
                 precondition=pre,
                 status=ProbeStatus.UNKNOWN,
-                evidence=f"Transport error comparing Alpine versions for '{pkg_display}': {apk_cmp.stderr.strip()}",
+                evidence=(
+                    f"Could not compare Alpine versions for '{pkg_display}' ('{installed_ver}' vs "
+                    f"'{fixed_version}'): {apk_cmp.stderr.strip() or apk_cmp.stdout.strip()}"
+                ),
                 command=cmd_str,
             )
-        if apk_cmp.returncode == 0 and apk_cmp.stdout.strip() in ("<", "=", ">"):
-            is_vuln = apk_cmp.stdout.strip() == "<"
-        else:
-            is_vuln = _fallback_version_lt(installed_ver, fixed_version)
+        is_vuln = apk_cmp.stdout.strip() == "<"
     else:
-        cmp_res = runner.run(["dpkg", "--compare-versions", installed_ver, "lt", fixed_version])
-        if cmp_res.transport_error:
+        cmp_lt = _compare_lt(runner, installed_ver, fixed_version)
+        if cmp_lt is None:
             return ProbeResult(
                 precondition=pre,
                 status=ProbeStatus.UNKNOWN,
-                evidence=f"Transport error comparing versions for '{pkg_display}': {cmp_res.stderr.strip()}",
+                evidence=(
+                    f"Could not compare versions for '{pkg_display}' ('{installed_ver}' vs '{fixed_version}'); "
+                    "no dpkg comparator on this host or the version is unreadable"
+                ),
                 command=cmd_str,
             )
-        if cmp_res.returncode == 127:
-            is_vuln = _fallback_version_lt(installed_ver, fixed_version)
-        elif cmp_res.returncode in (0, 1):
-            is_vuln = cmp_res.returncode == 0
-        else:
-            return ProbeResult(
-                precondition=pre,
-                status=ProbeStatus.UNKNOWN,
-                evidence=f"Invalid version comparison for '{pkg_display}' ('{installed_ver}' vs '{fixed_version}'): {cmp_res.stderr.strip()}",
-                command=cmd_str,
-            )
+        is_vuln = cmp_lt
     if is_vuln:
         return ProbeResult(
             precondition=pre,
@@ -384,11 +565,11 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
 
 def _probe_kernel_module(pre: Precondition, runner: HostRunner) -> ProbeResult:
     mod_name = str(pre.params.get("module") or "").strip()
-    if not mod_name:
+    if not re.fullmatch(r"[a-z0-9_-]+", mod_name):
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.UNKNOWN,
-            evidence="Missing 'module' parameter",
+            evidence=f"Missing or invalid 'module' parameter: {mod_name!r}",
             command="",
         )
 
@@ -417,22 +598,55 @@ def _probe_kernel_module(pre: Precondition, runner: HostRunner) -> ProbeResult:
                 command="cat /proc/modules",
             )
 
+    # Not loaded is not proof: unprivileged users can trigger autoload (e.g. nf_tables through user
+    # namespaces). It is proof only when loading is blocked.
+    blocked = _module_load_blocked(runner, target_norm)
+    if blocked:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.NOT_MET,
+            evidence=f"Kernel module '{mod_name}' is not loaded in /proc/modules and loading is blocked ({blocked})",
+            command="cat /proc/modules; modprobe -c",
+        )
     return ProbeResult(
         precondition=pre,
-        status=ProbeStatus.NOT_MET,
-        evidence=f"Kernel module '{mod_name}' is not loaded in /proc/modules",
-        command="cat /proc/modules",
+        status=ProbeStatus.UNKNOWN,
+        evidence=(
+            f"Kernel module '{mod_name}' is not loaded in /proc/modules, but it is not blocked and can be "
+            "loaded on demand (or is built in)"
+        ),
+        command="cat /proc/modules; modprobe -c",
     )
+
+
+def _module_load_blocked(runner: HostRunner, module_norm: str) -> str:
+    """Reason string when the module cannot be loaded ('' when it can or we cannot tell)."""
+    res = runner.run(["modprobe", "-c"])
+    if not res.transport_error and res.returncode == 0:
+        for line in res.stdout.splitlines():
+            parts = line.split()
+            if (
+                len(parts) >= 3
+                and parts[0] == "install"
+                and parts[1].replace("-", "_") == module_norm
+                and parts[2] in ("/bin/false", "/bin/true", "/usr/bin/false", "/usr/bin/true")
+            ):
+                return f"modprobe.d: '{line.strip()}'"
+    dis = runner.run(["cat", "/proc/sys/kernel/modules_disabled"])
+    if not dis.transport_error and dis.returncode == 0 and dis.stdout.strip() == "1":
+        return "kernel.modules_disabled=1"
+    return ""
 
 
 def _probe_sysctl_equals(pre: Precondition, runner: HostRunner) -> ProbeResult:
     key = str(pre.params.get("key") or "").strip()
     expected = str(pre.params.get("value") or "").strip()
-    if not key:
+    # A leading '-' would turn `sysctl -n <key>` into an option such as --system (a write as root).
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_./-]*", key):
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.UNKNOWN,
-            evidence="Missing 'key' parameter in sysctl_equals",
+            evidence=f"Missing or invalid 'key' parameter in sysctl_equals: {key!r}",
             command="",
         )
 
@@ -511,6 +725,14 @@ def _probe_network_listener(pre: Precondition, runner: HostRunner) -> ProbeResul
                 command="ss -tulpnH",
             )
 
+    if proto_filter in ("mptcp", "sctp"):
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"'{proto_filter}' listeners are not listed by 'ss -tulpnH'",
+            command="ss -tulpnH",
+        )
+
     cmd = ["ss", "-tulpnH"]
     res = runner.run(cmd)
     if res.transport_error or res.returncode != 0:
@@ -523,6 +745,7 @@ def _probe_network_listener(pre: Precondition, runner: HostRunner) -> ProbeResul
 
     matching_non_loopback: list[str] = []
     matching_loopback: list[str] = []
+    hidden_process = 0  # matching sockets whose owner ss did not show (non-root, other user's socket)
 
     for line in res.stdout.splitlines():
         cols = line.split()
@@ -542,6 +765,8 @@ def _probe_network_listener(pre: Precondition, runner: HostRunner) -> ProbeResul
             continue
 
         if process_filter and process_filter not in line.lower():
+            if "users:(" not in line:
+                hidden_process += 1
             continue
 
         is_loop = _is_loopback_host(host_part)
@@ -552,6 +777,17 @@ def _probe_network_listener(pre: Precondition, runner: HostRunner) -> ProbeResul
             matching_loopback.append(summary)
         else:
             matching_non_loopback.append(summary)
+
+    if hidden_process and not matching_non_loopback and (scope == "non_loopback" or not matching_loopback):
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=(
+                f"{hidden_process} matching socket(s) have their process name hidden "
+                f"(ss run without root), so '{process_filter}' cannot be ruled out"
+            ),
+            command="ss -tulpnH",
+        )
 
     if scope == "non_loopback":
         if matching_non_loopback:
@@ -594,22 +830,115 @@ def _probe_network_listener(pre: Precondition, runner: HostRunner) -> ProbeResul
     )
 
 
-def _probe_firewall_allows_port(pre: Precondition, runner: HostRunner) -> ProbeResult:
-    port = str(pre.params.get("port") or "any").strip()
-    proto = str(pre.params.get("proto") or "tcp").lower().strip()
+class UfwRule(NamedTuple):
+    """One row of `ufw status [verbose]`: To / Action [Direction] / From."""
 
-    # Try `ufw status verbose` first
+    ports: str  # "22", "8000:9000", "80,443", "any", or an app profile name
+    proto: str | None
+    action: str  # ALLOW | LIMIT | DENY | REJECT
+    direction: str  # IN | OUT | FWD ("IN" when the non-verbose output omits it)
+    source: str
+    restricted_to: bool  # destination address or interface given in the To column
+
+
+_UFW_RULE_RE = re.compile(
+    r"^(?P<to>.+?)\s+(?P<action>ALLOW|DENY|REJECT|LIMIT)(?:\s+(?P<dir>IN|OUT|FWD))?\s+(?P<src>.+?)\s*$"
+)
+
+
+def _parse_ufw_rules(out: str) -> list[UfwRule]:
+    # Every row that looks like a rule counts, with or without the "To Action From" header:
+    # missing a rule here would turn an open port into a false NOT_MET.
+    rules: list[UfwRule] = []
+    for raw in out.splitlines():
+        line = re.sub(r"\s+#.*$", "", raw).rstrip()
+        stripped = line.strip()
+        if not stripped or set(stripped) <= {"-", " "} or re.match(r"^To\s+Action\s+From$", stripped):
+            continue
+        if re.match(r"^(Status|Default|Logging|New profiles):", stripped, re.IGNORECASE):
+            continue
+        m = _UFW_RULE_RE.match(line.strip())
+        if not m:
+            continue
+        to_clean = m.group("to").replace("(v6)", "").strip()
+        restricted = " on " in f" {to_clean} "
+        tokens = to_clean.split(" on ")[0].split()
+        port_spec = tokens[-1] if tokens else "Anywhere"
+        restricted = restricted or len(tokens) > 1
+        if port_spec.lower() == "anywhere":
+            ports, proto = "any", None
+        elif "/" in port_spec:
+            ports, proto = port_spec.split("/", 1)
+        else:
+            ports, proto = port_spec, None
+        rules.append(
+            UfwRule(
+                ports=ports,
+                proto=proto.lower() if proto else None,
+                action=m.group("action"),
+                direction=m.group("dir") or "IN",
+                source=m.group("src").replace("(v6)", "").strip(),
+                restricted_to=restricted,
+            )
+        )
+    return rules
+
+
+def _ufw_port_matches(rule_ports: str, port: int) -> bool | None:
+    """True/False for numeric ports, lists and ranges; None for app profile names."""
+    if rule_ports == "any":
+        return True
+    saw_name = False
+    for item in rule_ports.split(","):
+        item = item.strip()
+        m_range = re.fullmatch(r"(\d+):(\d+)", item)
+        if m_range and int(m_range.group(1)) <= port <= int(m_range.group(2)):
+            return True
+        if item.isdigit() and int(item) == port:
+            return True
+        if not m_range and not item.isdigit():
+            saw_name = True
+    return None if saw_name else False
+
+
+def _docker_bridge_present(runner: HostRunner) -> bool | None:
+    """Docker publishes ports through its own iptables/nft chains, around ufw.
+    True/False when `ip` answered (rc 0 / rc 1); None when the check itself could not run."""
+    res = runner.run(["ip", "-o", "link", "show", "docker0"])
+    if res.transport_error:
+        return None
+    if res.returncode == 0:
+        return True
+    return False if res.returncode == 1 else None
+
+
+def _probe_firewall_allows_port(pre: Precondition, runner: HostRunner) -> ProbeResult:
+    port_raw = str(pre.params.get("port") or "any").strip()
+    proto = str(pre.params.get("proto") or "tcp").lower().strip()
+    cmd_str = "ufw status verbose"
+
     res = runner.run(["ufw", "status", "verbose"])
     if res.transport_error:
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.UNKNOWN,
             evidence=f"Transport error checking firewall: {res.stderr.strip()}",
-            command="ufw status verbose",
+            command=cmd_str,
         )
     if res.returncode != 0 or not res.stdout.strip():
         # Try non-verbose `ufw status` in case mock or older ufw is used
         res = runner.run(["ufw", "status"])
+
+    def _unknown(why: str) -> ProbeResult:
+        return ProbeResult(precondition=pre, status=ProbeStatus.UNKNOWN, evidence=why, command=cmd_str)
+
+    def _not_met(why: str) -> ProbeResult:
+        docker = _docker_bridge_present(runner)
+        if docker is None:
+            return _unknown(f"{why}, but Docker could not be ruled out (`ip -o link show docker0` did not answer)")
+        if docker:
+            return _unknown(f"{why}, but Docker is present and its published ports bypass ufw")
+        return ProbeResult(precondition=pre, status=ProbeStatus.NOT_MET, evidence=why, command=cmd_str)
 
     if res.returncode == 0 and res.stdout.strip():
         out = res.stdout.strip()
@@ -619,7 +948,7 @@ def _probe_firewall_allows_port(pre: Precondition, runner: HostRunner) -> ProbeR
                 precondition=pre,
                 status=ProbeStatus.MET,
                 evidence="Host firewall (ufw) is inactive; incoming traffic is not blocked by ufw",
-                command="ufw status verbose",
+                command=cmd_str,
             )
         if "status: active" in out_lower:
             if "allow (incoming)" in out_lower:
@@ -627,50 +956,47 @@ def _probe_firewall_allows_port(pre: Precondition, runner: HostRunner) -> ProbeR
                     precondition=pre,
                     status=ProbeStatus.MET,
                     evidence="ufw is active with 'Default: allow (incoming)'",
-                    command="ufw status verbose",
+                    command=cmd_str,
                 )
-            # Check if specific port or general allow rules exist (excluding Default: summary line)
-            allow_lines = [
-                ln.strip()
-                for ln in out.splitlines()
-                if not ln.strip().lower().startswith("default:")
-                and "ALLOW" in ln.upper()
-                and "OUT" not in ln.upper()
-            ]
-            if port != "any":
-                port_allowed = any(
-                    re.search(rf"\b{re.escape(port)}(/{proto})?\b", ln, re.IGNORECASE)
-                    for ln in allow_lines
-                )
-                if port_allowed:
-                    return ProbeResult(
-                        precondition=pre,
-                        status=ProbeStatus.MET,
-                        evidence=f"ufw is active and explicitly ALLOWs port {port}/{proto}",
-                        command="ufw status verbose",
+            default_deny = "deny (incoming)" in out_lower or "reject (incoming)" in out_lower
+            allowing = [r for r in _parse_ufw_rules(out) if r.action in ("ALLOW", "LIMIT") and r.direction == "IN"]
+            if port_raw.lower() != "any":
+                if not port_raw.isdigit():
+                    return _unknown(f"Invalid port parameter {port_raw!r}")
+                port = int(port_raw)
+                undecided: list[str] = []
+                for rule in allowing:
+                    if rule.proto not in (None, proto):
+                        continue
+                    hit = _ufw_port_matches(rule.ports, port)
+                    if hit is None:
+                        undecided.append(f"{rule.ports} (application profile)")
+                    elif hit and rule.source.lower() == "anywhere" and not rule.restricted_to:
+                        return ProbeResult(
+                            precondition=pre,
+                            status=ProbeStatus.MET,
+                            evidence=f"ufw is active and {rule.action}s {port}/{proto} from Anywhere ({rule.ports})",
+                            command=cmd_str,
+                        )
+                    elif hit:
+                        undecided.append(f"{rule.ports} from {rule.source}")
+                if undecided:
+                    return _unknown(
+                        f"ufw rules that may allow {port}/{proto} cannot be resolved: {'; '.join(undecided[:3])}"
                     )
-                if "deny (incoming)" in out_lower or "reject (incoming)" in out_lower or not allow_lines:
-                    return ProbeResult(
-                        precondition=pre,
-                        status=ProbeStatus.NOT_MET,
-                        evidence=f"ufw is active with default deny incoming and no ALLOW rule for {port}/{proto}",
-                        command="ufw status verbose",
-                    )
+                if default_deny:
+                    return _not_met(f"ufw is active with default deny incoming and no ALLOW rule for {port}/{proto}")
             else:
-                if allow_lines:
+                if allowing:
+                    sample = "; ".join(f"{r.ports}/{r.proto or 'any'} from {r.source}" for r in allowing[:3])
                     return ProbeResult(
                         precondition=pre,
                         status=ProbeStatus.MET,
-                        evidence=f"ufw is active with incoming ALLOW rule(s): {'; '.join(allow_lines[:3])}",
-                        command="ufw status verbose",
+                        evidence=f"ufw is active with incoming ALLOW rule(s): {sample}",
+                        command=cmd_str,
                     )
-                if "deny (incoming)" in out_lower or "reject (incoming)" in out_lower:
-                    return ProbeResult(
-                        precondition=pre,
-                        status=ProbeStatus.NOT_MET,
-                        evidence="ufw is active with 'Default: deny (incoming)' and no incoming ALLOW rules",
-                        command="ufw status verbose",
-                    )
+                if default_deny:
+                    return _not_met("ufw is active with 'Default: deny (incoming)' and no incoming ALLOW rules")
 
     return ProbeResult(
         precondition=pre,
@@ -679,17 +1005,33 @@ def _probe_firewall_allows_port(pre: Precondition, runner: HostRunner) -> ProbeR
             f"Could not verify firewall policy without root privileges "
             f"({res.stderr.strip() or 'ufw status unavailable'})"
         ),
-        command="ufw status verbose",
+        command=cmd_str,
     )
+
+
+_UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9@_.:\\-]+$")
+
+
+def _valid_unit_name(name: str) -> bool:
+    """systemd unit names only; a leading '-' would be read as an option (e.g. '-H host')."""
+    return bool(name) and not name.startswith("-") and bool(_UNIT_NAME_RE.match(name))
+
+
+def _unit_active(runner: HostRunner, unit: str) -> bool | None:
+    """True/False from `systemctl is-active`; None when the check itself could not run."""
+    res = runner.run(["systemctl", "is-active", unit])
+    if res.transport_error or res.returncode == 127:
+        return None
+    return res.returncode == 0 and res.stdout.strip().lower() == "active"
 
 
 def _probe_systemd_service(pre: Precondition, runner: HostRunner) -> ProbeResult:
     service = str(pre.params.get("service") or "").strip()
-    if not service:
+    if not _valid_unit_name(service):
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.UNKNOWN,
-            evidence="Missing 'service' parameter",
+            evidence=f"Missing or invalid 'service' parameter: {service!r}",
             command="",
         )
 
@@ -712,11 +1054,44 @@ def _probe_systemd_service(pre: Precondition, runner: HostRunner) -> ProbeResult
             evidence=f"systemd unit '{service}' is active",
             command=cmd_str,
         )
-    if state in ("inactive", "failed", "deactivating") or "could not be found" in res.stderr.lower() or res.returncode in (3, 4):
+    if res.returncode == 4 or "could not be found" in res.stderr.lower():
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"systemd unit '{service}' not found; the daemon may run outside systemd",
+            command=cmd_str,
+        )
+    if state in ("inactive", "failed", "deactivating"):
+        load = runner.run(["systemctl", "show", "-p", "LoadState", "--value", service])
+        load_state = load.stdout.strip().lower() if not load.transport_error and load.returncode == 0 else ""
+        if load_state != "loaded":
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=f"systemd unit '{service}' is {state} but LoadState is '{load_state or 'unknown'}'",
+                command=cmd_str,
+            )
+        base = service[: -len(".service")] if service.endswith(".service") else service
+        socket_unit = f"{base}.socket"
+        socket_state = _unit_active(runner, socket_unit)
+        if socket_state is None:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=f"systemd unit '{service}' is {state}, but '{socket_unit}' could not be checked",
+                command=f"systemctl is-active {socket_unit}",
+            )
+        if socket_state:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.MET,
+                evidence=f"systemd unit '{service}' is {state}, but '{socket_unit}' is active and starts it on demand",
+                command=f"systemctl is-active {socket_unit}",
+            )
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.NOT_MET,
-            evidence=f"systemd unit '{service}' is not active (state='{state or 'not-found'}')",
+            evidence=f"systemd unit '{service}' is not active (state='{state}')",
             command=cmd_str,
         )
     return ProbeResult(
@@ -797,6 +1172,30 @@ def _probe_process_running(pre: Precondition, runner: HostRunner) -> ProbeResult
                 command=cmd_str,
             )
 
+    socket_unit = str(pre.params.get("socket_unit") or "").strip()
+    if socket_unit:
+        if not _valid_unit_name(socket_unit):
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=f"Invalid 'socket_unit' parameter: {socket_unit!r}",
+                command=cmd_str,
+            )
+        socket_state = _unit_active(runner, socket_unit)
+        if socket_state is None:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=f"Process '{proc_name}' is not running, and '{socket_unit}' could not be checked",
+                command=f"systemctl is-active {socket_unit}",
+            )
+        if socket_state:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.MET,
+                evidence=f"Process '{proc_name}' is not running now, but '{socket_unit}' is active and starts it on demand",
+                command=f"systemctl is-active {socket_unit}",
+            )
     return ProbeResult(
         precondition=pre,
         status=ProbeStatus.NOT_MET,
@@ -844,6 +1243,26 @@ def _probe_config_contains(pre: Precondition, runner: HostRunner) -> ProbeResult
             command="",
         )
 
+    semantics = str(pre.params.get("semantics") or "").strip().lower()
+    directive = str(pre.params.get("directive") or "").strip().lower()
+    if semantics == "first" and not re.fullmatch(r"[a-z][a-z0-9]*", directive):
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"semantics 'first' needs a valid 'directive' parameter, got {directive!r}",
+            command="",
+        )
+    if semantics == "first" and path_str == "/etc/ssh/sshd_config":
+        # The effective sshd configuration (includes and Match defaults resolved); needs root.
+        eff = runner.run(["sshd", "-T"])
+        if not eff.transport_error and eff.returncode == 0 and eff.stdout.strip():
+            eff_line = next(
+                (ln.strip() for ln in eff.stdout.splitlines() if ln.strip().lower().split(" ", 1)[0] == directive),
+                None,
+            )
+            hit = eff_line if eff_line is not None and regex.search(eff_line) else None
+            return _config_result(pre, path_str, pattern, negate, hit, "sshd -T", effective=True)
+
     cmd = ["cat", path_str]
     res = runner.run(cmd)
     cmd_str = f"cat {path_str}"
@@ -883,27 +1302,59 @@ def _probe_config_contains(pre: Precondition, runner: HostRunner) -> ProbeResult
     matched_line: str | None = None
     for raw_line in res.stdout.splitlines():
         stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped or stripped.startswith(("#", ";")):
             continue
         active_line = stripped.split("#", 1)[0].strip()
         if not active_line:
             continue
+        if semantics == "first":
+            first_token = active_line.split(None, 1)[0].lower()
+            if first_token == "include":
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.UNKNOWN,
+                    evidence=(
+                        f"'{path_str}' has an Include ('{active_line}') that can set '{directive}' first; "
+                        "the effective value needs `sshd -T` (root)"
+                    ),
+                    command=cmd_str,
+                )
+            if first_token == "match":
+                break  # later directives are conditional, not global
+            if first_token != directive:
+                continue
+            # The first occurrence wins; later ones are ignored by the daemon.
+            matched_line = active_line if regex.search(active_line) else None
+            break
         if regex.search(active_line):
             matched_line = active_line
             break
 
+    return _config_result(pre, path_str, pattern, negate, matched_line, cmd_str)
+
+
+def _config_result(
+    pre: Precondition,
+    path_str: str,
+    pattern: str,
+    negate: bool,
+    matched_line: str | None,
+    cmd_str: str,
+    effective: bool = False,
+) -> ProbeResult:
+    where = "the effective sshd configuration" if effective else f"'{path_str}'"
     if negate:
         if matched_line is not None:
             return ProbeResult(
                 precondition=pre,
                 status=ProbeStatus.NOT_MET,
-                evidence=f"Mitigating setting active in '{path_str}': '{matched_line}'",
+                evidence=f"Mitigating setting active in {where}: '{matched_line}'",
                 command=cmd_str,
             )
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.MET,
-            evidence=f"Mitigating setting '{pattern}' not found in active lines of '{path_str}'",
+            evidence=f"Mitigating setting '{pattern}' not found in active lines of {where}",
             command=cmd_str,
         )
 
@@ -911,13 +1362,13 @@ def _probe_config_contains(pre: Precondition, runner: HostRunner) -> ProbeResult
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.MET,
-            evidence=f"Matched active setting in '{path_str}': '{matched_line}'",
+            evidence=f"Matched active setting in {where}: '{matched_line}'",
             command=cmd_str,
         )
     return ProbeResult(
         precondition=pre,
         status=ProbeStatus.NOT_MET,
-        evidence=f"Pattern '{pattern}' not present in active (non-comment) lines of '{path_str}'",
+        evidence=f"Pattern '{pattern}' not present in active (non-comment) lines of {where}",
         command=cmd_str,
     )
 
@@ -945,13 +1396,7 @@ def _probe_windows_build_vulnerable(pre: Precondition, runner: HostRunner) -> Pr
             command="",
         )
 
-    ps_script = (
-        "$cv = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'; "
-        "$build = \"$($cv.CurrentBuildNumber).$($cv.UBR)\"; "
-        "$kbs = @(Get-HotFix -ErrorAction SilentlyContinue | Select-Object -ExpandProperty HotFixID) -join ','; "
-        "Write-Output \"BUILD=$build|KBS=$kbs\""
-    )
-    cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script]
+    cmd = list(WIN_BUILD_ARGV)
     res = runner.run(cmd)
     cmd_str = "powershell Get-HotFix / CurrentVersion UBR"
     if res.transport_error or res.returncode != 0 or "BUILD=" not in res.stdout:

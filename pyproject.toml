@@ -25,6 +25,10 @@ notaffected = "notaffected.cli:main"
 [tool.hatch.version]
 path = "notaffected/__init__.py"
 
+[tool.pytest.ini_options]
+markers = ["live: runs real probes on this machine, skipped by default (run with -m live)"]
+addopts = "-m 'not live'"
+
 [tool.ruff]
 line-length = 120
 
@@ -36,4 +40,5 @@ ignore = ["E501"]
 dev = [
     "pytest>=7.0.0",
     "ruff>=0.1.0",
+    "jsonschema>=4.0",
 ]

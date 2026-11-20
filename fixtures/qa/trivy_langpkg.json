@@ -1,0 +1,4 @@
+{"SchemaVersion": 2, "ArtifactName": "app:latest", "ArtifactType": "container_image",
+ "Results": [{"Target": "usr/lib/python3/site-packages/requests-2.25.1.dist-info/METADATA", "Class": "lang-pkgs", "Type": "python-pkg",
+   "Vulnerabilities": [{"VulnerabilityID": "CVE-2023-32681", "PkgName": "requests", "InstalledVersion": "2.25.1", "FixedVersion": "2.31.0", "Severity": "MEDIUM",
+     "PkgIdentifier": {"PURL": "pkg:pypi/requests@2.25.1"}}]}]}

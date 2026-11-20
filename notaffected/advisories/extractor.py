@@ -52,7 +52,6 @@ KERNEL_PATH_TO_MODULE: dict[str, str] = {
     "net/sctp/": "sctp",
     "net/can/": "can",
     "drivers/usb/storage/": "usb_storage",
-    "net/mptcp/": "mptcp_diag",
 }
 
 PROBE_PARAM_SCHEMA: dict[str, tuple[str, ...]] = {
@@ -71,7 +70,7 @@ PROBE_PARAM_SCHEMA: dict[str, tuple[str, ...]] = {
 }
 
 PROBE_OPTIONAL_PARAMS: dict[str, tuple[str, ...]] = {
-    "kernel_version_vulnerable": ("min_version",),
+    "kernel_version_vulnerable": ("min_version", "track_fixes", "mainline_from"),
     "package_installed_vulnerable": ("fixed_version", "release_fixes"),
     "kernel_module_loaded": (),
     "sysctl_equals": (),
@@ -83,6 +82,22 @@ PROBE_OPTIONAL_PARAMS: dict[str, tuple[str, ...]] = {
     "windows_build_vulnerable": ("fixed_build",),
     "windows_registry_equals": ("negate",),
     "windows_service_active": (),
+}
+
+# Justification used for every LLM-proposed precondition; the LLM never chooses it.
+PROBE_DEFAULT_JUSTIFICATION: dict[str, VexJustification] = {
+    "kernel_version_vulnerable": VexJustification.VULNERABLE_CODE_NOT_PRESENT,
+    "package_installed_vulnerable": VexJustification.VULNERABLE_CODE_NOT_PRESENT,
+    "kernel_module_loaded": VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+    "sysctl_equals": VexJustification.INLINE_MITIGATIONS_ALREADY_EXIST,
+    "network_listener": VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+    "firewall_allows_port": VexJustification.INLINE_MITIGATIONS_ALREADY_EXIST,
+    "systemd_service_active": VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+    "process_running": VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+    "config_contains": VexJustification.INLINE_MITIGATIONS_ALREADY_EXIST,
+    "windows_build_vulnerable": VexJustification.VULNERABLE_CODE_NOT_PRESENT,
+    "windows_registry_equals": VexJustification.INLINE_MITIGATIONS_ALREADY_EXIST,
+    "windows_service_active": VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
 }
 
 WINDOWS_ALLOWED_PROBES: frozenset[str] = frozenset(
@@ -123,9 +138,26 @@ def resolve_check_spec(
     package_hint: str | None = None,
     fixed_version_hint: str | None = None,
     offline: bool = False,
+    package_class: str | None = None,
 ) -> CheckSpec:
-    """Resolve a CheckSpec for `cve_id`: built-in golden spec first, then OSV + Ubuntu OSV + heuristics/LLM."""
+    """Resolve a CheckSpec for `cve_id`: built-in golden spec first, then OSV + Ubuntu OSV + heuristics/LLM.
+
+    `package_class="lang"` (a scanner finding in a pip/npm/jar/... package) yields a spec with no
+    host probes: dpkg/rpm/apk cannot see language packages, so "not installed" would be a false proof.
+    """
     norm_id = cve_id.strip().upper()
+    if package_class == "lang":
+        return CheckSpec(
+            cve_id=norm_id,
+            summary=(
+                f"Language-ecosystem package{f' {package_hint!r}' if package_hint else ''}; "
+                "host package probes do not apply"
+            ),
+            preconditions=[],
+            confidence="low",
+            source="fallback",
+            os_source="heuristic",
+        )
     if norm_id in BUILTIN_SPECS:
         return BUILTIN_SPECS[norm_id]
 
@@ -187,6 +219,7 @@ def resolve_check_spec(
                     if fixed_version_hint
                     else VexJustification.COMPONENT_NOT_PRESENT
                 ),
+                origin="scanner",
             )
         )
     return CheckSpec(
@@ -201,6 +234,7 @@ def resolve_check_spec(
         ),
         confidence="low",
         source="fallback",
+        os_source="heuristic",
     )
 
 
@@ -221,6 +255,25 @@ def extract_from_osv_payload(
     pkg_name, fixed_ver, ecosystem = _extract_package_and_fix(
         osv_data, package_hint, fixed_version_hint
     )
+    distro_eco = _is_distro_ecosystem(ecosystem)
+    if ecosystem and not distro_eco:
+        # A language-ecosystem advisory (PyPI, npm, Go, Maven, ...): dpkg/rpm/apk cannot see those
+        # packages and the ecosystem's fix version is not a distro version.
+        if not package_hint:
+            return CheckSpec(
+                cve_id=cve_id,
+                summary=f"{summary} [{ecosystem} package; host package probes do not apply]",
+                severity=_extract_severity(osv_data),
+                preconditions=[],
+                patch=PatchInfo(
+                    status="released" if fixed_ver else "unknown", fixed_version=fixed_ver, pocket=ecosystem
+                ),
+                confidence="low",
+                source="fallback",
+                os_source="heuristic",
+            )
+        if not fixed_version_hint:
+            fixed_ver = None
 
     preconditions: list[Precondition] = []
     mitigation: list[str] = []
@@ -237,11 +290,8 @@ def extract_from_osv_payload(
         for r in (osv_data.get("references") or [])
         if isinstance(r, dict)
     )
-    has_mitre_windows = any(
-        "windows" in str(a.get("product") or "").lower()
-        for a in mitre_aff
-        if isinstance(a, dict)
-    )
+    mitre_products = [str(a.get("product") or "").lower() for a in mitre_aff if isinstance(a, dict)]
+    has_mitre_windows = bool(mitre_products) and all("windows" in prod for prod in mitre_products)
     has_windows_phrase = text_lower.startswith("windows ") or any(
         phrase in text_lower
         for phrase in (
@@ -275,6 +325,20 @@ def extract_from_osv_payload(
         or (not pkg_name and has_msrc_ref and "windows" in text_lower)
     )
     os_family = "windows" if is_windows else "linux"
+    has_kb_ref = bool(re.search(r"\bKB\d{6,8}\b", full_text, re.IGNORECASE))
+    kernel_by_pkg = pkg_name in ("linux", "linux-image", "kernel")
+    if is_windows:
+        # Structured only with MSRC + KB evidence or an all-Windows MITRE product list.
+        os_source = "structured" if (has_mitre_windows or (has_msrc_ref and has_kb_ref)) else "heuristic"
+    else:
+        os_source = "structured" if (distro_eco or kernel_by_pkg) else "heuristic"
+    # Provenance of the version/package precondition built below.
+    if package_hint:
+        pkg_origin = "scanner"
+    elif distro_eco and pkg_name:
+        pkg_origin = "osv"
+    else:
+        pkg_origin = "heuristic"
 
     if is_windows:
         kb_match = re.search(r"\b(KB\d{6,8})\b", full_text, re.IGNORECASE)
@@ -303,7 +367,8 @@ def extract_from_osv_payload(
 
         if kb_id or fixed_build:
             win_params: dict[str, Any] = {}
-            if kb_id:
+            # A KB regexed from prose can be unrelated: it is only used when MITRE gives no build.
+            if kb_id and not fixed_build:
                 win_params["kb"] = kb_id
             if fixed_build:
                 win_params["fixed_build"] = (
@@ -316,7 +381,7 @@ def extract_from_osv_payload(
             desc_parts = []
             if fixed_build:
                 desc_parts.append(f"OS build < {fixed_build}")
-            if kb_id:
+            if "kb" in win_params:
                 desc_parts.append(f"update {kb_id} is not installed")
             preconditions.append(
                 Precondition(
@@ -324,23 +389,11 @@ def extract_from_osv_payload(
                     params=win_params,
                     description="Windows " + " and ".join(desc_parts),
                     justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_PRESENT,
+                    origin="osv" if fixed_build else "heuristic",
                 )
             )
 
-        win_service_map = (
-            ("spooler", "Spooler", "Print Spooler"),
-            ("remote desktop licensing", "TermServLicensing", "Remote Desktop Licensing"),
-            ("message queuing", "MSMQ", "Message Queuing (MSMQ)"),
-            ("msmq", "MSMQ", "Message Queuing (MSMQ)"),
-            ("dns server", "DNS", "Windows DNS Server"),
-            ("dhcp server", "DHCPServer", "Windows DHCP Server"),
-            ("windows search", "WSearch", "Windows Search"),
-            ("wi-fi", "WlanSvc", "WLAN AutoConfig"),
-            ("wlan", "WlanSvc", "WLAN AutoConfig"),
-            ("http protocol stack", "W3SVC", "IIS World Wide Web Publishing"),
-            ("windows kerberos", "Kdc", "Kerberos Key Distribution Center"),
-        )
-        for phrase, svc_name, svc_label in win_service_map:
+        for phrase, svc_name, svc_label in _WIN_SERVICE_PHRASES:
             if phrase in text_lower:
                 preconditions.append(
                     Precondition(
@@ -348,6 +401,7 @@ def extract_from_osv_payload(
                         params={"service": svc_name},
                         description=f"{svc_label} service ('{svc_name}') is Running",
                         justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+                        origin="heuristic",
                     )
                 )
                 mitigation.append(
@@ -355,17 +409,19 @@ def extract_from_osv_payload(
                 )
                 break
 
-    is_kernel = (
-        not is_windows
-        and (pkg_name in ("linux", "linux-image", "kernel") or "linux kernel" in text_lower)
-    )
+    is_kernel = not is_windows and (kernel_by_pkg or (not pkg_name and "linux kernel" in text_lower))
     if is_kernel:
+        kernel_params: dict[str, Any] = {"fixed_version": fixed_ver or ""}
+        track_fixes = _extract_kernel_track_fixes(osv_data)
+        if track_fixes:
+            kernel_params["track_fixes"] = track_fixes
         preconditions.append(
             Precondition(
                 probe="kernel_version_vulnerable",
-                params={"fixed_version": fixed_ver or ""},
+                params=kernel_params,
                 description=f"Running kernel is older than fixed version '{fixed_ver or 'unfixed'}'",
                 justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_PRESENT,
+                origin=pkg_origin,
             )
         )
     elif pkg_name and not is_windows:
@@ -375,7 +431,7 @@ def extract_from_osv_payload(
         }
         if not fixed_version_hint:
             rel_fixes = _extract_release_fixes(osv_data, pkg_name)
-            if len(rel_fixes) > 1:
+            if rel_fixes:
                 pkg_params["release_fixes"] = rel_fixes
         preconditions.append(
             Precondition(
@@ -390,22 +446,24 @@ def extract_from_osv_payload(
                     if fixed_ver
                     else VexJustification.COMPONENT_NOT_PRESENT
                 ),
+                origin=pkg_origin,
             )
         )
 
-    # Deterministic heuristic extraction for Linux kernel modules and listeners
+    # Keyword heuristics (non-authoritative): kernel modules only for kernel advisories, listeners for any.
     if not is_windows:
         detected_module: str | None = None
-        for mod in KNOWN_KERNEL_MODULES:
-            if re.search(rf"\b{re.escape(mod)}\b", text_lower):
-                detected_module = mod
-                break
-        if not detected_module:
+        if is_kernel:
+            for mod in KNOWN_KERNEL_MODULES:
+                if re.search(rf"\b{re.escape(mod)}\b", text_lower):
+                    detected_module = mod
+                    break
+        if is_kernel and not detected_module:
             for alias, canonical_mod in KERNEL_ALIAS_TO_MODULE.items():
                 if re.search(rf"\b{re.escape(alias)}\b", text_lower):
                     detected_module = canonical_mod
                     break
-        if not detected_module:
+        if is_kernel and not detected_module:
             for path_prefix, mapped_mod in KERNEL_PATH_TO_MODULE.items():
                 if path_prefix in text_lower:
                     detected_module = mapped_mod
@@ -417,6 +475,7 @@ def extract_from_osv_payload(
                     params={"module": detected_module},
                     description=f"Kernel module '{detected_module}' is loaded",
                     justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+                    origin="heuristic",
                 )
             )
             mitigation.append(f"sudo modprobe -r {detected_module}")
@@ -431,6 +490,7 @@ def extract_from_osv_payload(
                     params={"proto": proto, "port": port_num, "scope": "non_loopback"},
                     description=f"{proto.upper()} port {port_num} is listening on a non-loopback address",
                     justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
+                    origin="heuristic",
                 )
             )
             mitigation.append(f"sudo ufw deny {port_num}/{proto}")
@@ -442,15 +502,12 @@ def extract_from_osv_payload(
             ref_snippets = fetch_reference_snippets(osv_data)
             if ref_snippets:
                 enriched_text = f"{full_text}\n\n{ref_snippets}"
-        llm_pres, llm_mitigations, llm_os = _extract_via_llm(
+        llm_pres, llm_mitigations = _extract_via_llm(
             cve_id,
             enriched_text,
             os_family=os_family,
             is_kernel=is_kernel,
-            os_locked=bool(is_windows or is_kernel or pkg_name),
         )
-        if llm_os in ("linux", "windows") and not is_kernel and not pkg_name:
-            os_family = llm_os
         existing_probes = {_precondition_dedup_key(p) for p in preconditions}
         for lp in llm_pres:
             key = _precondition_dedup_key(lp)
@@ -508,6 +565,7 @@ def extract_from_osv_payload(
         confidence=confidence,
         source=source,
         os_family=os_family,
+        os_source=os_source,
     )
 
 
@@ -594,6 +652,80 @@ def _extract_package_and_fix(
     return pkg_name, fixed_ver, ecosystem
 
 
+_NON_KERNEL_LINUX_PACKAGES = ("linux-firmware", "linux-libc-dev", "linux-meta", "linux-signed", "linux-restricted")
+
+
+def _extract_kernel_track_fixes(osv_data: dict[str, Any]) -> dict[str, str]:
+    """Per-track kernel fixes from Ubuntu OSV data, keyed 'ubuntu:<release>:<line>:<flavour>'.
+
+    Each Ubuntu kernel source package is one flavour/line: 'linux' = generic, 'linux-hwe-6.5' =
+    generic on line 6.5, 'linux-azure' = azure, 'linux-lowlatency-hwe-6.5' = lowlatency on 6.5.
+    The line comes from the '-X.Y' suffix, else from the fixed version. "" = listed, no fix.
+    A key that gets two different fixed ABIs is dropped (it would be a guess).
+    """
+    tracks: dict[str, str] = {}
+    conflicted: set[str] = set()
+    for aff in osv_data.get("affected") or []:
+        if not isinstance(aff, dict):
+            continue
+        pkg = aff.get("package") or {}
+        eco = str(pkg.get("ecosystem") or "").lower()
+        name = str(pkg.get("name") or "").strip().lower()
+        m_rel = re.fullmatch(r"ubuntu:(\d{2}\.\d{2})(?::lts)?", eco)
+        if not m_rel or not (name == "linux" or name.startswith("linux-")):
+            continue
+        if name.startswith(_NON_KERNEL_LINUX_PACKAGES):
+            continue
+        fixed = ""
+        for rng in aff.get("ranges") or []:
+            if not isinstance(rng, dict) or str(rng.get("type") or "").upper() == "GIT":
+                continue
+            for ev in rng.get("events") or []:
+                if isinstance(ev, dict) and ev.get("fixed"):
+                    fixed = str(ev["fixed"]).strip()
+                    break
+            if fixed:
+                break
+        rest = name[len("linux"):].lstrip("-")
+        m_line = re.search(r"(?:^|-)(\d+\.\d+)$", rest)
+        if m_line:
+            line = m_line.group(1)
+            rest = rest[: m_line.start()]
+        else:
+            m_fixed_line = re.match(r"^(\d+\.\d+)\.", fixed)
+            if not m_fixed_line:
+                continue
+            line = m_fixed_line.group(1)
+        parts = [t for t in rest.split("-") if t and t != "hwe"]
+        flavour = "-".join(parts) or "generic"
+        key = f"ubuntu:{m_rel.group(1)}:{line}:{flavour}"
+        if key in tracks and _kernel_abi(tracks[key]) != _kernel_abi(fixed):
+            conflicted.add(key)
+        tracks.setdefault(key, fixed)
+    for key in conflicted:
+        tracks.pop(key, None)
+    return tracks
+
+
+def _kernel_abi(version: str) -> str:
+    m = re.match(r"^(\d+\.\d+\.\d+-\d+)", version.strip())
+    return m.group(1) if m else version.strip()
+
+
+# OSV ecosystems whose packages are OS packages that dpkg/rpm/apk (or the kernel probe) can see.
+_DISTRO_ECOSYSTEMS = frozenset(
+    {
+        "ubuntu", "debian", "alpine", "rocky linux", "almalinux", "red hat", "suse", "opensuse",
+        "mageia", "photon os", "wolfi", "chainguard", "azure linux", "mariner", "openeuler", "minimos",
+        "echo", "linux",
+    }
+)
+
+
+def _is_distro_ecosystem(ecosystem: str | None) -> bool:
+    return bool(ecosystem) and str(ecosystem).split(":", 1)[0].strip().lower() in _DISTRO_ECOSYSTEMS
+
+
 def _extract_release_fixes(osv_data: dict[str, Any], pkg_name: str) -> dict[str, str]:
     """Collect per-distro-release fixed versions (e.g. 'ubuntu:22.04' -> '3.0.2-0ubuntu1.16')
     so a multi-release Ubuntu/Debian/Alpine fleet compares against each host's own release track.
@@ -621,6 +753,8 @@ def _extract_release_fixes(osv_data: dict[str, Any], pkg_name: str) -> dict[str,
             rel_key = f"alpine:{m_alp.group(1)}"
         if not rel_key:
             continue
+        # Every listed release is recorded; "" = listed as affected with no fix yet.
+        rel_fixes.setdefault(rel_key, "")
         for rng in aff.get("ranges") or []:
             if not isinstance(rng, dict) or str(rng.get("type") or "").upper() == "GIT":
                 continue
@@ -628,7 +762,8 @@ def _extract_release_fixes(osv_data: dict[str, Any], pkg_name: str) -> dict[str,
                 if isinstance(ev, dict) and ev.get("fixed"):
                     f_str = str(ev["fixed"]).strip()
                     if f_str and not _GIT_HASH_RE.fullmatch(f_str):
-                        rel_fixes[rel_key] = f_str
+                        if not rel_fixes[rel_key]:
+                            rel_fixes[rel_key] = f_str
                         break
     return rel_fixes
 
@@ -661,20 +796,39 @@ _NON_DAEMON_PACKAGES: frozenset[str] = frozenset(
     }
 )
 
-_KNOWN_WINDOWS_SERVICES: frozenset[str] = frozenset(
-    {
-        "msmq",
-        "spooler",
-        "termservlicensing",
-        "dns",
-        "dhcpserver",
-        "wsearch",
-        "wlansvc",
-        "w3svc",
-        "kdc",
-        "netlogon",
-    }
+# Advisory phrase -> Windows service name. Drives the deterministic service heuristic and
+# grounds LLM-proposed windows_service_active checks (a service counts as named in the advisory
+# when its name or one of its phrases appears).
+_WIN_SERVICE_PHRASES: tuple[tuple[str, str, str], ...] = (
+    ("spooler", "Spooler", "Print Spooler"),
+    ("remote desktop licensing", "TermServLicensing", "Remote Desktop Licensing"),
+    ("message queuing", "MSMQ", "Message Queuing (MSMQ)"),
+    ("msmq", "MSMQ", "Message Queuing (MSMQ)"),
+    ("dns server", "DNS", "Windows DNS Server"),
+    ("dhcp server", "DHCPServer", "Windows DHCP Server"),
+    ("windows search", "WSearch", "Windows Search"),
+    ("wi-fi", "WlanSvc", "WLAN AutoConfig"),
+    ("wlan", "WlanSvc", "WLAN AutoConfig"),
+    ("http protocol stack", "W3SVC", "IIS World Wide Web Publishing"),
+    ("windows kerberos", "Kdc", "Kerberos Key Distribution Center"),
 )
+
+
+def _mentions(term: str, text_lower: str) -> bool:
+    """True when `term` appears in the advisory as a whole token (not inside a longer word)."""
+    term = term.strip().lower()
+    if not term:
+        return False
+    return bool(re.search(rf"(?<![a-z0-9_.-]){re.escape(term)}(?![a-z0-9_-])", text_lower))
+
+
+def _mentions_port(port: object, text_lower: str) -> bool:
+    port_s = str(port or "").strip()
+    if not port_s.isdigit():
+        return False
+    return bool(
+        re.search(rf"\bport\s+{port_s}\b|\b{port_s}/(?:tcp|udp)\b|:{port_s}\b", text_lower)
+    )
 
 
 def _is_grounded_llm_precondition(
@@ -682,51 +836,61 @@ def _is_grounded_llm_precondition(
     advisory_text_lower: str,
     is_kernel: bool,
 ) -> bool:
-    """Reject common small-LLM hallucinations (e.g. kernel_module_loaded('curl'),
-    process_running('msmq.exe'), or systemd_service_active('curl.service')).
+    """Accept an LLM precondition only when every name, port, key or path it uses is written in
+    the advisory itself (rejects e.g. apache2.service for an nginx advisory, or kernel_module_loaded('curl')).
     """
     p = cand.probe
+    params = cand.params
     if p == "kernel_module_loaded":
-        mod = str(cand.params.get("module") or "").strip().lower().replace("-", "_")
+        mod = str(params.get("module") or "").strip().lower().replace("-", "_")
         return is_kernel and mod in KNOWN_KERNEL_MODULES
 
     if p == "process_running":
-        proc = str(cand.params.get("process") or "").strip().lower()
+        proc = str(params.get("process") or "").strip().lower()
         base = proc[:-4] if proc.endswith(".exe") else proc
         if not base or base in _NON_DAEMON_PACKAGES:
             return False
-        if proc.endswith(".exe") and proc not in advisory_text_lower:
-            return False
-        return True
+        return _mentions(base, advisory_text_lower)
 
     if p == "systemd_service_active":
-        svc = str(cand.params.get("service") or "").strip().lower()
+        svc = str(params.get("service") or "").strip().lower()
         base = svc[:-8] if svc.endswith(".service") else svc
         if not base or base in _NON_DAEMON_PACKAGES:
             return False
-        return True
+        return _mentions(base, advisory_text_lower)
 
     if p == "windows_service_active":
-        svc = str(cand.params.get("service") or "").strip().lower()
+        svc = str(params.get("service") or "").strip()
         if not svc:
             return False
-        return svc in _KNOWN_WINDOWS_SERVICES or bool(
-            re.search(rf"\b{re.escape(svc)}\b", advisory_text_lower)
+        return _mentions(svc, advisory_text_lower) or any(
+            name.lower() == svc.lower() and phrase in advisory_text_lower for phrase, name, _ in _WIN_SERVICE_PHRASES
         )
 
+    if p == "network_listener":
+        port, proc = params.get("port"), str(params.get("process") or "")
+        if not port and not proc:
+            return False
+        if port and not _mentions_port(port, advisory_text_lower):
+            return False
+        return not proc or _mentions(proc, advisory_text_lower)
+
+    if p == "firewall_allows_port":
+        return _mentions_port(params.get("port"), advisory_text_lower)
+
     if p == "config_contains":
-        cfg_path = str(cand.params.get("path") or "").strip().lower()
-        return bool(cfg_path and cfg_path in advisory_text_lower)
+        return _mentions(str(params.get("path") or ""), advisory_text_lower)
 
     if p == "sysctl_equals":
-        sys_key = str(cand.params.get("key") or "").strip().lower()
-        return bool(sys_key and sys_key in advisory_text_lower)
+        return _mentions(str(params.get("key") or ""), advisory_text_lower)
 
     if p == "windows_registry_equals":
-        reg_name = str(cand.params.get("name") or "").strip().lower()
-        return bool(reg_name and reg_name in advisory_text_lower)
+        return _mentions(str(params.get("name") or ""), advisory_text_lower)
 
-    return True
+    if p == "package_installed_vulnerable":
+        return _mentions(str(params.get("package") or ""), advisory_text_lower)
+
+    return False
 
 
 _SAFE_LLM_MITIGATION_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -763,11 +927,11 @@ def _extract_via_llm(
     advisory_text: str,
     os_family: str = "linux",
     is_kernel: bool = False,
-    os_locked: bool = False,
-) -> tuple[list[Precondition], list[str], str]:
+) -> tuple[list[Precondition], list[str]]:
     """Ask the local/configured LLM to map advisory prose into closed PROBE_TYPES.
-    Drops any unrecognized probe type, cross-OS probe, hallucinated module/service,
-    missing required parameter, or unsafe mitigation command.
+    Drops any unrecognized probe type, cross-OS probe, ungrounded name/port/path,
+    missing required parameter, or unsafe mitigation command. The LLM never sets the OS
+    family or the VEX justification, and its preconditions are tagged origin="llm".
     """
     allowed_set = WINDOWS_ALLOWED_PROBES if os_family == "windows" else LINUX_ALLOWED_PROBES
     if not is_kernel:
@@ -780,40 +944,30 @@ def _extract_via_llm(
     os_label = "Windows Server" if os_family == "windows" else "Linux"
     if os_family == "windows":
         example_json = (
-            '{"os_family": "windows", "preconditions": [{"probe": "windows_service_active", '
-            '"params": {"service": "<ServiceName>"}, "description": "Windows service is running", '
-            '"justification_if_not_met": "component_not_present"}], '
+            '{"preconditions": [{"probe": "windows_service_active", '
+            '"params": {"service": "<ServiceName>"}, "description": "Windows service is running"}], '
             '"mitigation": ["Stop-Service -Name <ServiceName> -Force"]}'
         )
     else:
         example_json = (
-            '{"os_family": "linux", "preconditions": [{"probe": "systemd_service_active", '
-            '"params": {"service": "<unit>.service"}, "description": "Systemd service is active", '
-            '"justification_if_not_met": "vulnerable_code_not_in_execute_path"}], '
+            '{"preconditions": [{"probe": "systemd_service_active", '
+            '"params": {"service": "<unit>.service"}, "description": "Systemd service is active"}], '
             '"mitigation": ["sudo systemctl disable --now <unit>.service"]}'
         )
     prompt = (
         f"Extract at most 2 deterministic {os_label} runtime preconditions for {cve_id}.\n"
         "If the advisory is for a CLI tool or library (e.g. curl, openssl, glibc, runc, xz-utils) "
-        "with no always-running daemon or kernel module, return {\"os_family\": \"linux\", \"preconditions\": [], \"mitigation\": []}.\n"
+        "with no always-running daemon or kernel module, return {\"preconditions\": [], \"mitigation\": []}.\n"
         "For Microsoft Message Queuing (MSMQ), use ONLY windows_service_active with service='MSMQ'.\n"
         f"Allowed probes:\n{schema_lines}\n"
-        "Allowed justification_if_not_met: component_not_present, vulnerable_code_not_present, "
-        "vulnerable_code_not_in_execute_path, inline_mitigations_already_exist.\n"
+        "Use only names, ports and paths that appear in the advisory text.\n"
         f"Return compact JSON (short descriptions <10 words):\n{example_json}\n\n"
         f"Advisory:\n{advisory_text[:1000]}"
     )
     resp = generate_json(prompt, timeout=90)
     if not resp:
-        return [], [], os_family
+        return [], []
 
-    detected_os = os_family if os_locked else str(resp.get("os_family") or os_family).strip().lower()
-    if detected_os not in ("linux", "windows"):
-        detected_os = os_family
-    effective_allowed = WINDOWS_ALLOWED_PROBES if detected_os == "windows" else LINUX_ALLOWED_PROBES
-    if not is_kernel:
-        effective_allowed = effective_allowed - {"kernel_module_loaded", "kernel_version_vulnerable"}
-    valid_justifications = {j.value for j in VexJustification}
     adv_lower = advisory_text.lower()
 
     valid_preconditions: list[Precondition] = []
@@ -821,14 +975,11 @@ def _extract_via_llm(
         if not isinstance(raw_p, dict):
             continue
         probe_name = str(raw_p.get("probe") or "")
-        if probe_name not in effective_allowed:
+        if probe_name not in allowed_set:
             continue
         normalized_p = dict(raw_p)
-        just_val = str(normalized_p.get("justification_if_not_met") or "").strip()
-        if just_val not in valid_justifications:
-            normalized_p["justification_if_not_met"] = (
-                VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH.value
-            )
+        normalized_p["justification_if_not_met"] = PROBE_DEFAULT_JUSTIFICATION[probe_name].value
+        normalized_p["origin"] = "llm"
         if not normalized_p.get("description"):
             normalized_p["description"] = f"Check {probe_name}"
         try:
@@ -847,4 +998,4 @@ def _extract_via_llm(
             continue
         if _is_safe_llm_mitigation(m, is_kernel=is_kernel):
             mitigations.append(m.strip())
-    return valid_preconditions, mitigations, detected_os
+    return valid_preconditions, mitigations

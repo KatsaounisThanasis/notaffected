@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from notaffected.advisories.builtin_specs import BUILTIN_SPECS
 from notaffected.cli import main
 from notaffected.engine.evaluator import evaluate_fleet
@@ -178,7 +180,10 @@ def test_mixed_linux_and_windows_demo_fleet():
 
 
 
+@pytest.mark.live
 def test_cli_spec_check_and_filter_live_local(tmp_path: Path):
+    # Runs real probes on this machine, so its verdicts depend on the live kernel and services.
+    # Skipped by default; run with `pytest -m live`.
     # 1. `notaffected spec CVE-2026-98432`
     rc_spec = main(["spec", "CVE-2026-98432"])
     assert rc_spec == 0
@@ -227,3 +232,17 @@ def test_cli_spec_check_and_filter_live_local(tmp_path: Path):
     assert len(filtered_vex["statements"]) == 3
     assert html_filter_path.is_file()
     assert "<!DOCTYPE html>" in html_filter_path.read_text(encoding="utf-8")
+
+
+def test_duplicate_host_names_are_refused(tmp_path: Path):
+    inv_file = tmp_path / "dup.yml"
+    inv_file.write_text(
+        "hosts:\n  - name: web\n    ssh: ops@10.0.0.10\n  - name: web\n    ssh: ops@10.0.0.11\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="web"):
+        load_runners(inventory_path=inv_file)
+    # the CLI reports it instead of crashing, and never builds a VEX with colliding hosts
+    vex = tmp_path / "x.vex.json"
+    assert main(["check", "CVE-2024-6387", "-i", str(inv_file), "--emit-vex", str(vex)]) == 2
+    assert not vex.exists()

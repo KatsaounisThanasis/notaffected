@@ -48,6 +48,7 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         ),
         confidence="high",
         source="builtin",
+        os_source="curated",
     ),
     "CVE-2024-47176": CheckSpec(
         cve_id="CVE-2024-47176",
@@ -56,7 +57,17 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         preconditions=[
             Precondition(
                 probe="package_installed_vulnerable",
-                params={"package": "cups-browsed", "fixed_version": "2.0.0-0ubuntu10.2"},
+                params={
+                    "package": "cups-browsed",
+                    "fixed_version": "2.0.0-0ubuntu10.2",
+                    # Per-release binary fixes from UBUNTU-CVE-2024-47176 on OSV (checked 2026-11-20);
+                    # 20.04/22.04 build cups-browsed from the cups-filters source.
+                    "release_fixes": {
+                        "ubuntu:20.04": "1.27.4-1ubuntu0.4",
+                        "ubuntu:22.04": "1.28.15-0ubuntu1.4",
+                        "ubuntu:24.04": "2.0.0-0ubuntu10.2",
+                    },
+                },
                 description="Package 'cups-browsed' is installed and < 2.0.0-0ubuntu10.2",
                 justification_if_not_met=VexJustification.COMPONENT_NOT_PRESENT,
             ),
@@ -85,6 +96,7 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         ),
         confidence="high",
         source="builtin",
+        os_source="curated",
     ),
     "CVE-2023-32233": CheckSpec(
         cve_id="CVE-2023-32233",
@@ -93,7 +105,8 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         preconditions=[
             Precondition(
                 probe="kernel_version_vulnerable",
-                params={"fixed_version": "6.2.0-21"},
+                # NVD: last affected range 6.3 to 6.3.2 (fix commit c1592a89942e), so mainline 6.4+ has the fix.
+                params={"fixed_version": "6.2.0-21", "mainline_from": "6.4"},
                 description="Running Linux kernel is < 6.2.0-21",
                 justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_PRESENT,
             ),
@@ -122,6 +135,7 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         ),
         confidence="high",
         source="builtin",
+        os_source="curated",
     ),
     "CVE-2022-47942": CheckSpec(
         cve_id="CVE-2022-47942",
@@ -130,7 +144,8 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         preconditions=[
             Precondition(
                 probe="kernel_version_vulnerable",
-                params={"fixed_version": "5.19.0-28"},
+                # NVD: last affected range 5.19 to 5.19.2 (fix commit 8f0541186e9a), so mainline 6.0+ has the fix.
+                params={"fixed_version": "5.19.0-28", "mainline_from": "6.0"},
                 description="Running Linux kernel is < 5.19.0-28",
                 justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_PRESENT,
             ),
@@ -160,6 +175,7 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         ),
         confidence="high",
         source="builtin",
+        os_source="curated",
     ),
     "CVE-2024-6387": CheckSpec(
         cve_id="CVE-2024-6387",
@@ -168,13 +184,23 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         preconditions=[
             Precondition(
                 probe="package_installed_vulnerable",
-                params={"package": "openssh-server", "fixed_version": "1:9.6p1-3ubuntu13.3"},
+                params={
+                    "package": "openssh-server",
+                    "fixed_version": "1:9.6p1-3ubuntu13.3",
+                    # Per-release fixes from UBUNTU-CVE-2024-6387 on OSV (checked 2026-11-20).
+                    # 20.04 (8.2p1) predates the regression and is not listed, so it gives UNKNOWN.
+                    "release_fixes": {
+                        "ubuntu:22.04": "1:8.9p1-3ubuntu0.10",
+                        "ubuntu:24.04": "1:9.6p1-3ubuntu13.3",
+                    },
+                },
                 description="Package 'openssh-server' is installed and < 1:9.6p1-3ubuntu13.3",
                 justification_if_not_met=VexJustification.COMPONENT_NOT_PRESENT,
             ),
             Precondition(
                 probe="process_running",
-                params={"process": "sshd"},
+                # Ubuntu 22.10+ starts sshd on demand from ssh.socket, so no sshd process is not proof.
+                params={"process": "sshd", "socket_unit": "ssh.socket"},
                 description="OpenSSH daemon ('sshd') process is running",
                 justification_if_not_met=VexJustification.VULNERABLE_CODE_NOT_IN_EXECUTE_PATH,
             ),
@@ -190,13 +216,18 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
                     "path": "/etc/ssh/sshd_config",
                     "pattern": r"^\s*LoginGraceTime\s+0\b",
                     "negate": True,
+                    # sshd keeps the first value it reads, so only the first LoginGraceTime counts.
+                    "semantics": "first",
+                    "directive": "LoginGraceTime",
                 },
                 description="LoginGraceTime is not set to 0 in /etc/ssh/sshd_config",
                 justification_if_not_met=VexJustification.INLINE_MITIGATIONS_ALREADY_EXIST,
             ),
         ],
         mitigation=[
-            "echo 'LoginGraceTime 0' | sudo tee -a /etc/ssh/sshd_config && sudo systemctl reload ssh",
+            # A drop-in is read through the Include at the top of Ubuntu's sshd_config, so it is the first
+            # value sshd sees; appending to sshd_config would lose to an earlier LoginGraceTime line.
+            "echo 'LoginGraceTime 0' | sudo tee /etc/ssh/sshd_config.d/00-notaffected.conf && sudo systemctl reload ssh",
             "sudo apt update && sudo apt install --only-upgrade openssh-server",
         ],
         patch=PatchInfo(
@@ -207,6 +238,7 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         ),
         confidence="high",
         source="builtin",
+        os_source="curated",
     ),
     "CVE-2024-38063": CheckSpec(
         cve_id="CVE-2024-38063",
@@ -247,6 +279,7 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         ),
         confidence="high",
         source="builtin",
+        os_source="curated",
     ),
     "CVE-2021-34527": CheckSpec(
         cve_id="CVE-2021-34527",
@@ -279,5 +312,6 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         ),
         confidence="high",
         source="builtin",
+        os_source="curated",
     ),
 }

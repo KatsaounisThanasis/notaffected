@@ -13,6 +13,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from notaffected.advisories.builtin_specs import BUILTIN_SPECS
 from notaffected.advisories.live_feed import (
     collect_scan_specs,
     discover_host_package_cves,
@@ -20,7 +21,7 @@ from notaffected.advisories.live_feed import (
 )
 from notaffected.cli import main
 from notaffected.inventory import generate_inventory_yaml
-from notaffected.probes.runner import CommandResult, DockerRunner, MockRunner, SSHRunner
+from notaffected.probes.runner import CommandResult, DockerRunner, LocalRunner, MockRunner, SSHRunner
 from notaffected.web import (
     _DEMO_MITIGATED,
     DashboardRequestHandler,
@@ -156,6 +157,10 @@ def test_web_dashboard_endpoints_end_to_end() -> None:
             html_body = resp.read().decode("utf-8")
             assert "notaffected" in html_body
             assert "Run Reachability Proof" in html_body
+        import re as _re
+
+        token = _re.search(r'<meta name="notaffected-token" content="([^"]+)"', html_body).group(1)
+        assert token == DashboardRequestHandler.request_token and "__NOTAFFECTED_TOKEN__" not in html_body
 
         with urllib.request.urlopen(
             f"http://127.0.0.1:{port}/api/spec?cve=CVE-2024-6387", timeout=5
@@ -173,7 +178,7 @@ def test_web_dashboard_endpoints_end_to_end() -> None:
                     "offline": True,
                 }
             ).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "X-Notaffected-Token": token},
         )
         with urllib.request.urlopen(post_req, timeout=5) as resp:
             post_json = json.load(resp)
@@ -194,6 +199,19 @@ def test_web_dashboard_endpoints_end_to_end() -> None:
             raise AssertionError("Expected HTTPError 403")
         except urllib.error.HTTPError as exc:
             assert exc.code == 403
+
+        # A same-origin JSON POST without the page's token (e.g. curl from another process) is refused
+        for bad in ({}, {"X-Notaffected-Token": "wrong"}):
+            no_token = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/mitigate",
+                data=b'{"target_mode":"local","host":"x","cve_id":"CVE-2024-6387","mitigation_index":0}',
+                headers={"Content-Type": "application/json", **bad},
+            )
+            try:
+                urllib.request.urlopen(no_token, timeout=5)
+                raise AssertionError("Expected HTTPError 403")
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 403
     finally:
         server.shutdown()
         server.server_close()
@@ -255,6 +273,7 @@ def test_apply_host_mitigation_flips_verdict_to_not_affected() -> None:
                 "host": "prod-edge-api-01",
                 "cve_id": "CVE-2024-6387",
                 "mitigation_index": 0,
+                "command": BUILTIN_SPECS["CVE-2024-6387"].mitigation[0],
             }
         )
         assert mit_res["ok"] is True
@@ -284,12 +303,33 @@ def test_apply_host_mitigation_flips_verdict_to_not_affected() -> None:
         _DEMO_MITIGATED.clear()
 
 
-def test_reset_lab_and_custom_target_runner() -> None:
+def test_reset_lab_and_custom_target_runner(monkeypatch) -> None:
+    # Hermetic: never exec into real lab containers. Discovery and DockerRunner.run are faked
+    # and the reset commands are only recorded.
+    import notaffected.web as web_mod
+
+    recorded: list[tuple[str, list[str]]] = []
+
+    def _fake_run(self: DockerRunner, argv: list[str]) -> CommandResult:
+        recorded.append((self.host_name, list(argv)))
+        return CommandResult(0, "", "")
+
+    monkeypatch.setattr(
+        web_mod,
+        "discover_docker_containers",
+        lambda: [{"name": "lab-ssh-vuln", "docker": "lab-ssh-vuln"}, {"name": "lab-win-dc01", "docker": "lab-win-dc01"}],
+    )
+    monkeypatch.setattr(DockerRunner, "run", _fake_run)
+    monkeypatch.setattr(web_mod, "_is_lab_runner", lambda runner: True)
+
     _DEMO_MITIGATED.add(("prod-edge-api-01", "CVE-2024-6387"))
     res = reset_lab_and_demo()
     assert res["ok"] is True
-    assert "demo_fleet" in res["reset_targets"]
+    assert res["reset_targets"] == ["demo_fleet", "lab-ssh-vuln", "lab-win-dc01"]
     assert len(_DEMO_MITIGATED) == 0
+    assert [host for host, _ in recorded] == ["lab-ssh-vuln", "lab-win-dc01"]
+    assert "/etc/ssh/sshd_config" in recorded[0][1][-1]
+    assert "/etc/win-sim/Spooler" in recorded[1][1][-1]
 
     r_docker = _build_runners_for_mode(
         "custom_target",
@@ -506,6 +546,8 @@ def test_multi_release_fixes_apk_rpm_and_ui_inspect() -> None:
         host_name="alpine-node",
         responses={
             ("apk", "info", "-e", "-v", "curl"): CommandResult(0, "curl-8.9.1-r1\n", ""),
+            # The host's own comparator decides (there is no digit-list fallback any more).
+            ("apk", "version", "-t", "8.9.1-r1", "8.9.0-r0"): CommandResult(0, ">\n", ""),
         },
     )
     pre_curl = Precondition(
@@ -640,3 +682,64 @@ def test_final_qa_security_and_invariant_fixes() -> None:
 
 
 
+
+
+def test_mitigation_runs_only_on_lab_containers_with_the_confirmed_command(monkeypatch) -> None:
+    import notaffected.web as web_mod
+
+    executed: list[tuple[str, list[str]]] = []
+
+    class _Rec(LocalRunner):
+        def run(self, argv):
+            executed.append((self.host_name, list(argv)))
+            return CommandResult(0, "", "")
+
+    cmd0 = BUILTIN_SPECS["CVE-2024-6387"].mitigation[0]
+    for runner in (_Rec(host_name="laptop"), SSHRunner(target="root@203.0.113.10")):
+        monkeypatch.setattr(web_mod, "_build_runners_for_mode", lambda *a, _r=runner, **k: [_r])
+        res = apply_host_mitigation(
+            {"target_mode": "local", "host": runner.host_name, "cve_id": "CVE-2024-6387", "mitigation_index": 0, "command": cmd0}
+        )
+        assert res["ok"] is False and "lab containers" in res["error"]
+    assert executed == []
+
+    lab = DockerRunner(container="lab-ssh-vuln", host_name="lab-ssh-vuln")
+    monkeypatch.setattr(web_mod, "_build_runners_for_mode", lambda *a, **k: [lab])
+    monkeypatch.setattr(DockerRunner, "run", lambda self, argv: executed.append((self.host_name, list(argv))) or CommandResult(0, "", ""))
+    monkeypatch.setattr(
+        web_mod.subprocess,
+        "run",
+        lambda argv, **k: type("P", (), {"returncode": 0, "stdout": "true\n", "stderr": ""})(),
+    )
+    base = {"target_mode": "docker_discovered", "host": "lab-ssh-vuln", "cve_id": "CVE-2024-6387", "mitigation_index": 0}
+    # the command shown to the user must be the one the server would run
+    assert apply_host_mitigation(dict(base, command="echo something else"))["ok"] is False
+    assert executed == []
+    assert apply_host_mitigation(dict(base, command=cmd0))["ok"] is True
+    assert executed and executed[0][0] == "lab-ssh-vuln"
+
+
+def test_ui_refuses_non_loopback_bind_without_opt_in(monkeypatch) -> None:
+    import pytest
+
+    import notaffected.web as web_mod
+
+    def _no_server(*_a, **_k):
+        raise AssertionError("a server must never start in this test")
+
+    # A regression must fail fast here, never bind 0.0.0.0 and block the suite.
+    monkeypatch.setattr(web_mod, "ThreadingHTTPServer", _no_server)
+    with pytest.raises(SystemExit, match="allow-remote"):
+        web_mod.run_web_server(host="0.0.0.0", port=0)
+
+
+def test_unlabelled_container_is_not_a_lab_runner(monkeypatch) -> None:
+    import notaffected.web as web_mod
+
+    monkeypatch.setattr(
+        web_mod.subprocess,
+        "run",
+        lambda argv, **k: type("P", (), {"returncode": 0, "stdout": "<no value>\n", "stderr": ""})(),
+    )
+    assert web_mod._is_lab_runner(DockerRunner(container="prod-api")) is False
+    assert web_mod._is_lab_runner(DockerRunner(container="-oops")) is False

@@ -6,8 +6,11 @@ Binds strictly to 127.0.0.1 by default with zero external framework dependencies
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
+import secrets
+import subprocess
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -150,7 +153,7 @@ def reset_lab_and_demo() -> dict[str, Any]:
     containers = {c["docker"] for c in discover_docker_containers()}
     if "lab-ssh-vuln" in containers:
         r_ssh = DockerRunner(container="lab-ssh-vuln", host_name="lab-ssh-vuln", os_family="linux")
-        res = r_ssh.run(
+        res = CommandResult(1, "", "not a labelled lab container") if not _is_lab_runner(r_ssh) else r_ssh.run(
             [
                 "sh",
                 "-c",
@@ -162,13 +165,37 @@ def reset_lab_and_demo() -> dict[str, Any]:
             reset_targets.append("lab-ssh-vuln")
     if "lab-win-dc01" in containers:
         r_win = DockerRunner(container="lab-win-dc01", host_name="lab-win-dc01", os_family="windows")
-        res = r_win.run(
+        res = CommandResult(1, "", "not a labelled lab container") if not _is_lab_runner(r_win) else r_win.run(
             ["sh", "-c", "echo '0' > /etc/win-sim/DisabledComponents && echo 'Running' > /etc/win-sim/Spooler"]
         )
         if res.returncode == 0 and not res.transport_error:
             reset_targets.append("lab-win-dc01")
 
     return {"ok": True, "reset_targets": reset_targets}
+
+
+def _is_lab_runner(runner: HostRunner) -> bool:
+    """Mitigations may only touch the simulated fleet or a lab container labelled notaffected.lab=true.
+
+    The label is read on the dashboard host with `docker inspect` (argv list, no shell); running it
+    through `runner.run` would execute inside the container instead.
+    """
+    if isinstance(runner, MockRunner):
+        return True
+    if not isinstance(runner, DockerRunner) or not runner.container or runner.container.startswith("-"):
+        return False
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", "-f", '{{index .Config.Labels "notaffected.lab"}}', runner.container],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
 def apply_host_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
@@ -196,15 +223,31 @@ def apply_host_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
             "ok": False,
             "error": "Selected mitigation is an advisory instruction, not a direct command.",
         }
+    if str(payload.get("command") or "") != cmd_text:
+        return {
+            "ok": False,
+            "error": "The confirmed command differs from the one the server would run; re-run the evaluation.",
+        }
 
-    runners = _build_runners_for_mode(
-        target_mode,
-        custom_target_type=custom_target_type,
-        custom_target_value=custom_target_value,
-    )
+    try:
+        runners = _build_runners_for_mode(
+            target_mode,
+            custom_target_type=custom_target_type,
+            custom_target_value=custom_target_value,
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     runner = next((r for r in runners if r.host_name == host), None)
     if runner is None:
         return {"ok": False, "error": f"Target host {host!r} not found in {target_mode!r}"}
+    if not _is_lab_runner(runner):
+        return {
+            "ok": False,
+            "error": (
+                "Mitigations run only on lab containers labelled notaffected.lab=true or on the simulated "
+                "fleet; apply them on real hosts yourself."
+            ),
+        }
 
     if isinstance(runner, MockRunner):
         _DEMO_MITIGATED.add((host, cve_id))
@@ -225,7 +268,11 @@ def apply_host_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
         exec_cmd = cmd_text
         if isinstance(runner, DockerRunner):
             if "LoginGraceTime 0" in exec_cmd and "/etc/ssh/sshd_config" in exec_cmd:
-                exec_cmd = "echo 'LoginGraceTime 0' >> /etc/ssh/sshd_config"
+                # Lab sshd_config has no Include: replace the directive so the first value is 0.
+                exec_cmd = (
+                    "sed -i '/^[[:space:]]*LoginGraceTime/d' /etc/ssh/sshd_config "
+                    "&& echo 'LoginGraceTime 0' >> /etc/ssh/sshd_config"
+                )
             else:
                 exec_cmd = re.sub(r"\bsudo\s+", "", exec_cmd)
         res = runner.run(["sh", "-c", exec_cmd])
@@ -277,11 +324,15 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
             f"Invalid or empty custom target address: {custom_target_value!r}"
         )
     else:
-        runners = _build_runners_for_mode(
-            target_mode,
-            custom_target_type=custom_target_type,
-            custom_target_value=custom_target_value,
-        )
+        try:
+            runners = _build_runners_for_mode(
+                target_mode,
+                custom_target_type=custom_target_type,
+                custom_target_value=custom_target_value,
+            )
+        except ValueError as exc:
+            runners = []
+            feed_meta["error"] = str(exc)
 
     if scan_mode == "custom_cves":
         raw_cves = payload.get("cves") or []
@@ -330,17 +381,12 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
         ]
         if len(non_builtin) > 1:
             fetch_advisories_concurrent(non_builtin)
-        grouped_findings: dict[str, Any] = {}
+        # Same rule as the CLI filter: one spec per (CVE, package), never a guess at "the" package.
+        grouped_findings: dict[tuple[str, str | None], Any] = {}
         for f in findings:
-            existing = grouped_findings.get(f.cve_id)
-            if existing is None:
-                grouped_findings[f.cve_id] = f
-            else:
-                pkg_cand = (f.package_name or "").lower()
-                if pkg_cand.endswith("-server") or pkg_cand.endswith("d"):
-                    grouped_findings[f.cve_id] = f
+            grouped_findings.setdefault((f.cve_id, f.package_name), f)
         specs = []
-        for cid, f in list(grouped_findings.items())[:MAX_CUSTOM_CVES]:
+        for (cid, _pkg), f in list(grouped_findings.items())[:MAX_CUSTOM_CVES]:
             specs.append(
                 resolve_check_spec(
                     cid,
@@ -348,6 +394,7 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
                     package_hint=f.package_name,
                     fixed_version_hint=f.fixed_version,
                     offline=offline,
+                    package_class=f.package_class,
                 )
             )
         if not specs and not explicit_report:
@@ -432,6 +479,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="notaffected-token" content="__NOTAFFECTED_TOKEN__" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230284c7'/><path d='M9 17l5 5 9-11' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
   <title>notaffected — Vulnerability Reachability &amp; OpenVEX Dashboard</title>
   <style>
@@ -837,6 +885,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </main>
 
   <script>
+    const PAGE_TOKEN = document.querySelector('meta[name="notaffected-token"]').content;
     let latestResult = null;
     let activeTargetConfig = {
       target_mode: "docker_discovered",
@@ -1060,7 +1109,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         const res = await fetch("/api/evaluate", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Notaffected-Token": PAGE_TOKEN },
           body: JSON.stringify(body),
         });
         latestResult = await res.json();
@@ -1106,7 +1155,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         await fetch("/api/reset", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Notaffected-Token": PAGE_TOKEN },
           body: JSON.stringify({}),
         });
         document.getElementById("feedBanner").textContent =
@@ -1152,7 +1201,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         try {
           const res = await fetch("/api/mitigate", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", "X-Notaffected-Token": PAGE_TOKEN },
             body: JSON.stringify({
               target_mode: activeTargetConfig.target_mode,
               custom_target_type: activeTargetConfig.custom_target_type,
@@ -1160,6 +1209,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               host: applyHost,
               cve_id: applyCve,
               mitigation_index: applyIdx,
+              command: applyCmd,
             }),
           });
           const data = await res.json();
@@ -1206,6 +1256,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 class DashboardRequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the local notaffected Web UI."""
+
+    # Per-process secret embedded in the served page and required on every POST, so a local
+    # process or a non-browser client cannot drive /api/* without first loading the page.
+    request_token: str = secrets.token_urlsafe(32)
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         return
@@ -1254,7 +1308,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
-            self._send_html(HTTPStatus.OK, DASHBOARD_HTML)
+            self._send_html(HTTPStatus.OK, DASHBOARD_HTML.replace("__NOTAFFECTED_TOKEN__", self.request_token))
             return
         if parsed.path == "/api/targets":
             self._send_json(HTTPStatus.OK, get_targets_metadata())
@@ -1276,6 +1330,10 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 HTTPStatus.FORBIDDEN,
                 {"error": "Forbidden cross-origin or non-JSON request"},
             )
+            return
+        sent_token = self.headers.get("X-Notaffected-Token") or ""
+        if not hmac.compare_digest(sent_token.encode("utf-8"), self.request_token.encode("utf-8")):
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "Missing or invalid request token"})
             return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path not in ("/api/evaluate", "/api/mitigate", "/api/reset"):
@@ -1314,8 +1372,19 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, result)
 
 
-def run_web_server(host: str = "127.0.0.1", port: int = 8484) -> None:
-    """Start the local notaffected Web UI server."""
+def check_bind_address(host: str, allow_remote: bool = False) -> None:
+    """Refuse a non-loopback bind unless explicitly allowed (raises SystemExit with the reason)."""
+    if host.strip().lower() not in ("127.0.0.1", "::1", "localhost") and not allow_remote:
+        raise SystemExit(
+            f"Refusing to bind the dashboard to {host!r}: it can run probes over SSH with your keys. "
+            "Pass --allow-remote to do it anyway."
+        )
+
+
+def run_web_server(host: str = "127.0.0.1", port: int = 8484, allow_remote: bool = False) -> None:
+    """Start the local notaffected Web UI server (loopback only unless `allow_remote`)."""
+    check_bind_address(host, allow_remote)
+    DashboardRequestHandler.request_token = secrets.token_urlsafe(32)
     server = ThreadingHTTPServer((host, port), DashboardRequestHandler)
     try:
         server.serve_forever()
