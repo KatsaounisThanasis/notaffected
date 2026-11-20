@@ -212,6 +212,11 @@ def build_html_report(
       overflow-wrap: anywhere;
       word-break: break-word;
     }}
+    th:nth-child(1), td:nth-child(1) {{ width: 14%; }}
+    th:nth-child(2), td:nth-child(2) {{ width: 12%; }}
+    th:nth-child(3), td:nth-child(3) {{ width: 12%; }}
+    th:nth-child(4), td:nth-child(4) {{ width: 16%; }}
+    th:nth-child(5), td:nth-child(5) {{ width: 46%; }}
     th {{ background: #0f172a; color: var(--muted); font-size: 0.85rem; text-transform: uppercase; }}
     .host-col {{ font-weight: 600; }}
     .row-mit {{ margin-top: 0.5rem; padding: 0.5rem; background: #0f172a; border-radius: 4px; }}

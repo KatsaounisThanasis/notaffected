@@ -352,14 +352,23 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
             specs = list(BUILTIN_SPECS.values())
         feed_meta["total_cves"] = len(specs)
     else:
-        specs, feed_meta = collect_scan_specs(
-            runners,
-            offline=offline,
-            use_llm=use_llm,
-        )
+        target_error = feed_meta.get("error")
+        if target_error and not runners:
+            specs = []
+        else:
+            specs, feed_meta = collect_scan_specs(
+                runners,
+                offline=offline,
+                use_llm=use_llm,
+            )
+            if target_error:
+                feed_meta["error"] = target_error
 
     verdicts = evaluate_fleet(specs, runners)
-    briefing = build_remediation_briefing(specs, verdicts, use_llm=use_llm)
+    if not verdicts:
+        briefing = feed_meta.get("error") or "No hosts or CVEs were evaluated."
+    else:
+        briefing = build_remediation_briefing(specs, verdicts, use_llm=use_llm)
     openvex_doc = build_openvex(verdicts)
     html_doc = build_html_report(specs, verdicts)
 
@@ -418,6 +427,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230284c7'/><path d='M9 17l5 5 9-11' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
   <title>notaffected — Vulnerability Reachability &amp; OpenVEX Dashboard</title>
   <style>
     :root {

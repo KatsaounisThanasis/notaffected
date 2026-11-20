@@ -185,18 +185,18 @@ def _try_apk_or_rpm_package(
 ) -> tuple[str | None, str | None, str] | None:
     """Fallback package lookup for Alpine (`apk`) and RHEL/Rocky/Alma/Fedora (`rpm`) hosts."""
     mock_resps = getattr(runner, "responses", None)
-    apk_cmd = ("apk", "info", "-v", pkg)
+    apk_cmd = ("apk", "info", "-e", "-v", pkg)
     rpm_cmd = ("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\\n", pkg)
 
     if mock_resps is None or apk_cmd in mock_resps:
         apk_res = runner.run(list(apk_cmd))
         if not apk_res.transport_error and apk_res.returncode != 127 and "unmocked command" not in apk_res.stderr.lower():
             if apk_res.returncode != 0 or not apk_res.stdout.strip():
-                return ("absent", "", f"apk info -v {pkg}")
+                return ("absent", "", f"apk info -e -v {pkg}")
             first = apk_res.stdout.strip().splitlines()[0].strip()
             prefix = f"{pkg}-"
             ver = first[len(prefix):] if first.startswith(prefix) else first
-            return ("ii", ver, f"apk info -v {pkg}")
+            return ("ii", ver, f"apk info -e -v {pkg}")
 
     if mock_resps is None or rpm_cmd in mock_resps:
         rpm_res = runner.run(list(rpm_cmd))

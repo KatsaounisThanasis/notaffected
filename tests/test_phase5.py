@@ -505,7 +505,7 @@ def test_multi_release_fixes_apk_rpm_and_ui_inspect() -> None:
     alpine_runner = MockRunner(
         host_name="alpine-node",
         responses={
-            ("apk", "info", "-v", "curl"): CommandResult(0, "curl-8.9.1-r1\n", ""),
+            ("apk", "info", "-e", "-v", "curl"): CommandResult(0, "curl-8.9.1-r1\n", ""),
         },
     )
     pre_curl = Precondition(
@@ -515,7 +515,7 @@ def test_multi_release_fixes_apk_rpm_and_ui_inspect() -> None:
     )
     res_apk = run_probe(pre_curl, alpine_runner)
     assert res_apk.status == ProbeStatus.NOT_MET
-    assert res_apk.command == "apk info -v curl"
+    assert res_apk.command == "apk info -e -v curl"
 
     rhel_runner = MockRunner(
         host_name="rhel-node",
