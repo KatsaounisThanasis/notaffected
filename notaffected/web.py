@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -366,6 +367,8 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
         try:
             if explicit_report:
                 parsed_report = json.loads(raw_report) if isinstance(raw_report, str) else raw_report
+                if not isinstance(parsed_report, dict):
+                    raise ValueError("Expected JSON object for scanner_report")
                 findings = parse_scanner_json(parsed_report)
             elif sample_path.is_file():
                 findings = parse_scanner_json(sample_path)
@@ -475,86 +478,128 @@ def get_targets_metadata() -> dict[str, Any]:
 
 
 DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="notaffected-token" content="__NOTAFFECTED_TOKEN__" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%230284c7'/><path d='M9 17l5 5 9-11' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2318181b'/><path d='M9 17l5 5 9-11' stroke='%23f08a59' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
   <title>notaffected — Vulnerability Reachability &amp; OpenVEX Dashboard</title>
   <style>
-    :root {
-      --bg: #070b14;
-      --bg-elevated: #0d1424;
-      --panel: rgba(15, 23, 42, 0.84);
-      --panel-solid: #0f172a;
-      --panel-alt: #162033;
-      --border: rgba(148, 163, 184, 0.16);
-      --border-strong: rgba(148, 163, 184, 0.28);
-      --text: #f1f5f9;
-      --text-soft: #cbd5e1;
-      --muted: #8b9bb4;
-      --accent: #38bdf8;
-      --accent-strong: #0284c7;
-      --accent-glow: rgba(56, 189, 248, 0.16);
+    :root, [data-theme="dark"] {
+      --bg: #09090b;
+      --surface: #111114;
+      --surface-2: #18181b;
+      --surface-hover: #1e1e23;
+      --surface-selected: #23232a;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-strong: rgba(255, 255, 255, 0.15);
+      --text: #ededed;
+      --text-soft: #d4d4d8;
+      --muted: #a1a1aa;
+      --subtle: #94949e;
+      --accent: #f08a59;
+      --accent-hover: #f59c71;
+      --accent-soft: rgba(240, 138, 89, 0.13);
+      --accent-border: rgba(240, 138, 89, 0.30);
+      --link: #60a5fa;
+      --link-soft: rgba(96, 165, 250, 0.12);
       --danger: #fb7185;
       --danger-strong: #f43f5e;
-      --danger-bg: rgba(244, 63, 94, 0.13);
+      --danger-soft: rgba(244, 63, 94, 0.12);
+      --danger-border: rgba(244, 63, 94, 0.30);
       --ok: #34d399;
-      --ok-strong: #10b981;
-      --ok-bg: rgba(16, 185, 129, 0.13);
+      --ok-soft: rgba(16, 185, 129, 0.12);
+      --ok-border: rgba(16, 185, 129, 0.30);
       --warn: #fbbf24;
-      --warn-bg: rgba(245, 158, 11, 0.13);
-      --radius: 14px;
-      --radius-sm: 9px;
-      --shadow: 0 12px 32px rgba(2, 6, 23, 0.45);
+      --warn-soft: rgba(245, 158, 11, 0.12);
+      --warn-border: rgba(245, 158, 11, 0.30);
+      --code-bg: #18181b;
+      --term-bg: #09090b;
+      --term-text: #e4e4e7;
+      --topbar-bg: rgba(9, 9, 11, 0.84);
+      --drawer-backdrop: rgba(0, 0, 0, 0.45);
+      --radius: 10px;
+      --radius-sm: 7px;
+      --ambient: radial-gradient(ellipse 65% 32% at 50% -10%, rgba(240, 138, 89, 0.09), transparent 70%);
     }
+
+    [data-theme="light"] {
+      --bg: #f6f7f9;
+      --surface: #ffffff;
+      --surface-2: #f1f3f6;
+      --surface-hover: #f8fafc;
+      --surface-selected: #eef2f6;
+      --border: #e4e7ec;
+      --border-strong: #d0d5dd;
+      --text: #18181b;
+      --text-soft: #3f3f46;
+      --muted: #525866;
+      --subtle: #5c6472;
+      --accent: #eb6c36;
+      --accent-hover: #d85a26;
+      --accent-soft: rgba(235, 108, 54, 0.10);
+      --accent-border: rgba(235, 108, 54, 0.28);
+      --link: #2563eb;
+      --link-soft: rgba(37, 99, 235, 0.08);
+      --danger: #dc2626;
+      --danger-strong: #dc2626;
+      --danger-soft: #fef2f2;
+      --danger-border: #fecaca;
+      --ok: #059669;
+      --ok-soft: #ecfdf5;
+      --ok-border: #a7f3d0;
+      --warn: #b45309;
+      --warn-soft: #fffbeb;
+      --warn-border: #fde68a;
+      --code-bg: #f4f4f5;
+      --term-bg: #18181b;
+      --term-text: #f4f4f5;
+      --topbar-bg: rgba(255, 255, 255, 0.88);
+      --drawer-backdrop: rgba(15, 23, 42, 0.22);
+      --ambient: none;
+    }
+
     * { box-sizing: border-box; }
-    html, body {
-      margin: 0;
-      padding: 0;
-      min-height: 100%;
-    }
+    html, body { margin: 0; padding: 0; min-height: 100%; }
     body {
-      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Geist", "Segoe UI", Roboto, sans-serif;
       background-color: var(--bg);
-      background-image:
-        radial-gradient(ellipse 80% 45% at 50% -12%, rgba(56, 189, 248, 0.13), transparent 70%),
-        radial-gradient(ellipse 50% 35% at 95% 10%, rgba(16, 185, 129, 0.06), transparent 65%);
+      background-image: var(--ambient);
       background-attachment: fixed;
       color: var(--text);
-      line-height: 1.5;
+      line-height: 1.48;
       -webkit-font-smoothing: antialiased;
     }
 
-    /* Sticky glass topbar */
+    /* Sticky glass header */
     header {
       position: sticky;
       top: 0;
       z-index: 30;
       border-bottom: 1px solid var(--border);
-      background: rgba(7, 11, 20, 0.82);
+      background: var(--topbar-bg);
       backdrop-filter: blur(14px);
       -webkit-backdrop-filter: blur(14px);
-      padding: 0.85rem 1.75rem;
+      padding: 0.65rem 1.5rem;
       display: flex;
       justify-content: space-between;
       align-items: center;
       flex-wrap: wrap;
-      gap: 0.9rem;
+      gap: 0.75rem;
     }
     .brand {
       display: flex;
       align-items: center;
-      gap: 0.75rem;
+      gap: 0.6rem;
       flex-wrap: wrap;
     }
     .brand-logo {
-      width: 34px;
-      height: 34px;
-      border-radius: 10px;
-      background: linear-gradient(135deg, #0ea5e9, #2563eb);
-      box-shadow: 0 4px 14px rgba(14, 165, 233, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      background: var(--surface-2);
+      border: 1px solid var(--border-strong);
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -562,204 +607,208 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .brand-title {
       display: flex;
-      flex-direction: column;
-      gap: 0.05rem;
-      margin-right: 0.4rem;
+      align-items: baseline;
+      gap: 0.45rem;
+      margin-right: 0.25rem;
     }
     .brand h1 {
       margin: 0;
-      font-size: 1.18rem;
+      font-size: 1.02rem;
       font-weight: 700;
       letter-spacing: -0.025em;
-      line-height: 1.15;
     }
     .brand-sub {
-      font-size: 0.72rem;
-      color: var(--muted);
-      letter-spacing: 0.01em;
+      font-size: 0.74rem;
+      color: var(--subtle);
+      font-weight: 500;
     }
     .pill {
       display: inline-flex;
       align-items: center;
-      gap: 0.42rem;
-      font-size: 0.74rem;
-      padding: 0.26rem 0.68rem;
+      gap: 0.36rem;
+      font-size: 0.71rem;
+      padding: 0.18rem 0.56rem;
       border-radius: 999px;
-      background: rgba(30, 41, 59, 0.75);
+      background: var(--surface-2);
       border: 1px solid var(--border);
-      color: var(--text-soft);
+      color: var(--muted);
       font-weight: 600;
       white-space: nowrap;
     }
-    .pill.accent { color: var(--accent); border-color: rgba(56, 189, 248, 0.28); background: rgba(56, 189, 248, 0.09); }
+    .pill.accent {
+      color: var(--accent);
+      background: var(--accent-soft);
+      border-color: var(--accent-border);
+    }
     .status-dot {
-      width: 7px;
-      height: 7px;
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
-      background: var(--muted);
+      background: var(--subtle);
       display: inline-block;
       flex-shrink: 0;
     }
-    .status-dot.ok { background: var(--ok); box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.18); }
-    .status-dot.accent { background: var(--accent); box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18); }
-    .status-dot.warn { background: var(--warn); box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.18); }
+    .status-dot.ok { background: var(--ok); }
+    .status-dot.warn { background: var(--warn); }
 
     main {
       width: 100%;
       max-width: 100%;
       margin: 0;
-      padding: 1.35rem 1.75rem 3rem;
+      padding: 1rem 1.5rem 2.25rem;
     }
 
-    /* Controls panel */
-    .controls-shell {
-      background: var(--panel);
+    /* Compact single-row command bar */
+    .toolbar-card {
+      background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-      padding: 1.2rem 1.3rem 1.05rem;
-      margin-bottom: 1.25rem;
+      padding: 0.65rem 0.85rem;
+      margin-bottom: 0.75rem;
     }
-    .controls-grid {
+    .toolbar-row {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      flex-wrap: wrap;
+    }
+    .toolbar-field {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      flex: 1 1 220px;
+      min-width: 200px;
+    }
+    .toolbar-field label {
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--subtle);
+      white-space: nowrap;
+    }
+    .toolbar-extras {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 0.95rem 1.1rem;
-      align-items: end;
+      gap: 0.7rem;
     }
-    .controls-footer {
-      margin-top: 1rem;
-      padding-top: 0.9rem;
+    .toolbar-extras:has(> div[style*="block"]) {
+      margin-top: 0.65rem;
+      padding-top: 0.65rem;
       border-top: 1px solid var(--border);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 0.85rem;
     }
     .field label {
       display: block;
-      font-size: 0.72rem;
+      font-size: 0.68rem;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--muted);
-      margin-bottom: 0.38rem;
+      letter-spacing: 0.07em;
+      color: var(--subtle);
+      margin-bottom: 0.28rem;
       font-weight: 700;
     }
     select, input[type="text"] {
       width: 100%;
-      padding: 0.58rem 0.78rem;
+      padding: 0.42rem 0.65rem;
       border-radius: var(--radius-sm);
       border: 1px solid var(--border);
-      background: rgba(7, 11, 20, 0.85);
+      background: var(--surface-2);
       color: var(--text);
-      font-size: 0.88rem;
-      transition: border-color 0.15s, box-shadow 0.15s;
+      font-size: 0.82rem;
+      transition: border-color 0.12s, box-shadow 0.12s;
       outline: none;
     }
-    select:hover, input[type="text"]:hover {
-      border-color: var(--border-strong);
-    }
+    select:hover, input[type="text"]:hover { border-color: var(--border-strong); }
     select:focus, input[type="text"]:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 3px var(--accent-glow);
+      box-shadow: 0 0 0 2px var(--accent-soft);
     }
     .btn-row {
       display: flex;
       align-items: center;
-      gap: 0.55rem;
+      gap: 0.42rem;
       flex-wrap: wrap;
     }
     button {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 0.42rem;
+      gap: 0.36rem;
       cursor: pointer;
-      padding: 0.56rem 0.98rem;
+      padding: 0.42rem 0.78rem;
       border-radius: var(--radius-sm);
       border: 1px solid var(--border-strong);
-      background: rgba(30, 41, 59, 0.78);
+      background: var(--surface-2);
       color: var(--text);
       font-weight: 600;
-      font-size: 0.84rem;
-      transition: transform 0.12s, background 0.15s, border-color 0.15s, box-shadow 0.15s;
+      font-size: 0.79rem;
+      transition: background 0.1s, border-color 0.1s, color 0.1s;
       white-space: nowrap;
     }
     button:hover:not(:disabled) {
-      background: rgba(51, 65, 85, 0.85);
-      border-color: rgba(148, 163, 184, 0.45);
-    }
-    button:active:not(:disabled) {
-      transform: translateY(1px);
+      background: var(--surface-hover);
+      border-color: var(--subtle);
     }
     button.primary {
-      background: linear-gradient(135deg, #0ea5e9, #0284c7);
-      border-color: rgba(56, 189, 248, 0.65);
-      color: #fff;
-      box-shadow: 0 4px 14px rgba(2, 132, 199, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #09090b;
     }
     button.primary:hover:not(:disabled) {
-      background: linear-gradient(135deg, #38bdf8, #0284c7);
-      box-shadow: 0 6px 18px rgba(14, 165, 233, 0.44);
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
     }
+    [data-theme="light"] button.primary { color: #ffffff; }
     button.ghost {
       background: transparent;
       border-color: var(--border);
-      color: var(--text-soft);
-      padding: 0.46rem 0.78rem;
-      font-size: 0.8rem;
+      color: var(--muted);
+      padding: 0.34rem 0.62rem;
+      font-size: 0.75rem;
     }
     button.ghost:hover:not(:disabled) {
-      background: rgba(30, 41, 59, 0.65);
+      background: var(--surface-2);
       color: var(--text);
+      border-color: var(--border-strong);
     }
-    /* The one action that changes a host: outlined in the warning colour, never the loudest button. */
     button.caution {
-      background: transparent;
-      border-color: rgba(251, 191, 36, 0.45);
+      background: var(--warn-soft);
+      border-color: var(--warn-border);
       color: var(--warn);
     }
-    button.caution:hover:not(:disabled) {
-      background: var(--warn-bg);
-      border-color: var(--warn);
-    }
-    button:disabled {
-      opacity: 0.45;
-      cursor: not-allowed;
-    }
-    button svg {
-      width: 14px;
-      height: 14px;
-      flex-shrink: 0;
-    }
+    button.caution:hover:not(:disabled) { border-color: var(--warn); }
+    button.icon-btn { padding: 0.34rem 0.48rem; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button svg { width: 13px; height: 13px; flex-shrink: 0; }
 
     /* Toggle switches */
     .toggles-group {
       display: flex;
       align-items: center;
-      gap: 1.1rem;
+      gap: 0.8rem;
       flex-wrap: wrap;
+      margin-left: auto;
     }
     .switch-label {
       display: inline-flex;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.4rem;
       cursor: pointer;
-      font-size: 0.82rem;
-      color: var(--text-soft);
+      font-size: 0.76rem;
+      color: var(--muted);
+      font-weight: 500;
       user-select: none;
     }
     .switch-label input[type="checkbox"] {
       appearance: none;
       -webkit-appearance: none;
-      width: 34px;
-      height: 19px;
+      width: 28px;
+      height: 16px;
       border-radius: 999px;
-      background: rgba(51, 65, 85, 0.9);
+      background: var(--surface-hover);
       border: 1px solid var(--border-strong);
       position: relative;
       cursor: pointer;
-      transition: background 0.18s, border-color 0.18s;
+      transition: background 0.14s, border-color 0.14s;
       margin: 0;
       flex-shrink: 0;
     }
@@ -768,166 +817,193 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       position: absolute;
       top: 2px;
       left: 2px;
-      width: 13px;
-      height: 13px;
+      width: 10px;
+      height: 10px;
       border-radius: 50%;
-      background: #e2e8f0;
-      transition: transform 0.18s;
+      background: var(--muted);
+      transition: transform 0.14s, background 0.14s;
     }
     .switch-label input[type="checkbox"]:checked {
-      background: var(--accent-strong);
+      background: var(--accent-soft);
       border-color: var(--accent);
     }
     .switch-label input[type="checkbox"]:checked::after {
-      transform: translateX(15px);
-      background: #fff;
+      transform: translateX(12px);
+      background: var(--accent);
     }
+    .switch-label input[type="checkbox"]:disabled { opacity: 0.4; cursor: not-allowed; }
 
-    /* Status strip */
     .feed-banner {
-      display: flex;
-      align-items: center;
-      gap: 0.55rem;
-      font-size: 0.82rem;
-      color: var(--muted);
-      background: rgba(15, 23, 42, 0.55);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      padding: 0.52rem 0.9rem;
-      margin-bottom: 1.25rem;
+      font-size: 0.74rem;
+      color: var(--subtle);
+      margin: 0 0 0.75rem 0.1rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 
-    /* KPI cards */
+    /* Unified Telemetry Strip (KPIs + Verdict Split) */
     .kpi-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 0.95rem;
-      margin-bottom: 1.35rem;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 0.65rem;
+      margin-bottom: 0.65rem;
+    }
+    @media (max-width: 1080px) {
+      .kpi-grid { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
     }
     .kpi-card {
-      position: relative;
-      background: var(--panel);
+      background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 1.05rem 1.15rem;
-      box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-      overflow: hidden;
-      transition: transform 0.15s, border-color 0.15s;
+      padding: 0.78rem 0.95rem;
+      transition: border-color 0.12s, background 0.12s;
     }
     .kpi-card.clickable { cursor: pointer; }
     .kpi-card.clickable:hover {
-      transform: translateY(-2px);
       border-color: var(--border-strong);
+      background: var(--surface-2);
     }
-    .kpi-card::before {
-      content: "";
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 2px;
-      background: var(--border-strong);
-    }
-    .kpi-card.kpi-danger::before { background: linear-gradient(90deg, var(--danger-strong), var(--danger)); }
-    .kpi-card.kpi-ok::before { background: linear-gradient(90deg, var(--ok-strong), var(--ok)); }
-    .kpi-card.kpi-warn::before { background: linear-gradient(90deg, #d97706, var(--warn)); }
-    .kpi-card.kpi-accent::before { background: linear-gradient(90deg, #0284c7, var(--accent)); }
-    .kpi-top {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 0.5rem;
+    .kpi-card.kpi-hot {
+      border-color: var(--danger-border);
+      background: linear-gradient(180deg, var(--danger-soft), var(--surface) 75%);
     }
     .kpi-card .label {
-      font-size: 0.72rem;
-      color: var(--muted);
+      font-size: 0.67rem;
+      color: var(--subtle);
       text-transform: uppercase;
-      letter-spacing: 0.06em;
+      letter-spacing: 0.07em;
       font-weight: 700;
     }
     .kpi-card .val {
-      font-size: 2rem;
-      font-weight: 800;
-      margin-top: 0.3rem;
+      font-size: 1.75rem;
+      font-weight: 700;
+      margin-top: 0.18rem;
       line-height: 1.1;
       letter-spacing: -0.03em;
       font-variant-numeric: tabular-nums;
     }
-    /* Hierarchy: affected is the headline when it is non-zero; the raw total is context. */
-    .kpi-card.kpi-hot {
-      background: linear-gradient(160deg, rgba(244, 63, 94, 0.17), var(--panel) 65%);
-      border-color: rgba(244, 63, 94, 0.45);
-      box-shadow: var(--shadow), 0 0 0 1px rgba(244, 63, 94, 0.16), 0 8px 28px rgba(244, 63, 94, 0.14);
-    }
-    .kpi-card.kpi-hot .val { font-size: 2.6rem; }
-    .kpi-card.kpi-muted .val { color: var(--text-soft); font-size: 1.6rem; }
+    .kpi-card.kpi-hot .val { font-size: 1.95rem; }
+    .kpi-card.kpi-muted .val { color: var(--muted); font-size: 1.55rem; }
     .val.danger { color: var(--danger); }
     .val.ok { color: var(--ok); }
     .val.warn { color: var(--warn); }
     .val.accent { color: var(--accent); }
     .kpi-bar {
-      margin-top: 0.55rem;
-      height: 5px;
+      margin-top: 0.4rem;
+      height: 4px;
       border-radius: 999px;
-      background: rgba(148, 163, 184, 0.14);
+      background: var(--surface-2);
       overflow: hidden;
     }
     .kpi-bar-fill {
       height: 100%;
       width: 0%;
       border-radius: 999px;
-      background: linear-gradient(90deg, #0ea5e9, #34d399);
-      transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+      background: var(--ok);
+      transition: width 0.35s ease;
     }
 
-    /* Section cards */
-    .section-card {
-      background: var(--panel);
+    /* Visual Verdict Split bar */
+    .dist-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.45rem 0.85rem;
+      margin-bottom: 0.85rem;
+      display: flex;
+      align-items: center;
+      gap: 0.8rem;
+      flex-wrap: wrap;
+    }
+    .dist-title {
+      font-size: 0.67rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--subtle);
+      white-space: nowrap;
+    }
+    .dist-track {
+      flex: 1 1 260px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--surface-2);
+      overflow: hidden;
+      display: flex;
+      gap: 2px;
+    }
+    .dist-seg { height: 100%; border-radius: 999px; transition: width 0.35s ease; }
+    .dist-seg.aff { background: var(--danger-strong); }
+    .dist-seg.inv { background: var(--warn); }
+    .dist-seg.ok { background: var(--ok); }
+    .dist-legend {
+      display: flex;
+      gap: 0.85rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .dist-legend span { display: inline-flex; align-items: center; gap: 0.3rem; }
+    .dist-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+
+    /* Workspace card + Tabs */
+    .workspace-card {
+      background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-      padding: 1.2rem 1.3rem;
-      margin-bottom: 1.35rem;
-      overflow-x: auto;
+      overflow: hidden;
     }
-    .section-header {
+    .workspace-tabs {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      gap: 0.9rem;
+      gap: 0.75rem;
       flex-wrap: wrap;
-      margin-bottom: 1rem;
+      padding: 0.62rem 0.95rem;
+      border-bottom: 1px solid var(--border);
     }
-    .section-title-wrap {
-      display: flex;
+    .tab-strip {
+      display: inline-flex;
       align-items: center;
-      gap: 0.6rem;
+      gap: 2px;
+      background: var(--surface-2);
+      padding: 2px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
     }
-    .section-header h2 {
-      margin: 0;
-      font-size: 1.02rem;
-      font-weight: 700;
-      letter-spacing: -0.01em;
+    .tab-btn {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      padding: 0.3rem 0.7rem;
+      font-size: 0.77rem;
+      font-weight: 600;
+      border-radius: 6px;
+    }
+    .tab-btn:hover:not(:disabled) { color: var(--text); background: transparent; }
+    .tab-btn.active {
+      background: var(--surface-hover);
+      color: var(--text);
     }
     .count-chip {
-      font-size: 0.72rem;
-      font-weight: 700;
-      padding: 0.16rem 0.52rem;
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 0.14rem 0.48rem;
       border-radius: 999px;
-      background: rgba(56, 189, 248, 0.12);
-      color: var(--accent);
-      border: 1px solid rgba(56, 189, 248, 0.25);
+      background: var(--surface-2);
+      color: var(--muted);
+      border: 1px solid var(--border);
       font-variant-numeric: tabular-nums;
     }
     .filter-bar {
       display: flex;
-      gap: 0.5rem;
+      gap: 0.42rem;
       flex-wrap: wrap;
       align-items: center;
     }
     .seg-group {
       display: inline-flex;
-      background: rgba(7, 11, 20, 0.75);
+      background: var(--surface-2);
       border: 1px solid var(--border);
       border-radius: var(--radius-sm);
       padding: 2px;
@@ -937,18 +1013,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border: none;
       background: transparent;
       color: var(--muted);
-      padding: 0.34rem 0.65rem;
-      font-size: 0.76rem;
+      padding: 0.26rem 0.56rem;
+      font-size: 0.73rem;
       font-weight: 600;
-      border-radius: 7px;
-      box-shadow: none;
+      border-radius: 5px;
     }
-    .seg-btn:hover:not(:disabled) {
-      background: rgba(30, 41, 59, 0.75);
-      color: var(--text);
-    }
+    .seg-btn:hover:not(:disabled) { color: var(--text); background: transparent; }
     .seg-btn.active {
-      background: rgba(56, 189, 248, 0.18);
+      background: var(--surface-hover);
       color: var(--accent);
     }
     .search-wrap {
@@ -958,121 +1030,159 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .search-wrap svg {
       position: absolute;
-      left: 0.65rem;
-      width: 14px;
-      height: 14px;
-      color: var(--muted);
+      left: 0.58rem;
+      width: 13px;
+      height: 13px;
+      color: var(--subtle);
       pointer-events: none;
     }
     .search-wrap input[type="text"] {
-      padding-left: 2rem;
-      width: 225px;
-      font-size: 0.83rem;
-      padding-top: 0.44rem;
-      padding-bottom: 0.44rem;
+      padding-left: 1.75rem;
+      padding-right: 1.8rem;
+      width: 220px;
+      font-size: 0.78rem;
+      padding-top: 0.34rem;
+      padding-bottom: 0.34rem;
+    }
+    .kbd-hint {
+      position: absolute;
+      right: 0.45rem;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.65rem;
+      color: var(--subtle);
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 0.02rem 0.28rem;
+      pointer-events: none;
     }
     .filter-bar select {
       width: auto;
-      font-size: 0.82rem;
-      padding: 0.44rem 0.7rem;
+      font-size: 0.77rem;
+      padding: 0.34rem 0.6rem;
     }
 
-    /* Table: its own scroll box, so the header can stay visible and the page stays short */
+    /* Scannable High-Density Table (F-pattern left-to-right) */
     .table-scroll {
-      max-height: calc(100vh - 150px);
+      max-height: calc(100vh - 235px);
       overflow: auto;
-      border-radius: 9px;
     }
     table {
       width: 100%;
-      min-width: 980px;
+      min-width: 960px;
       table-layout: fixed;
       border-collapse: separate;
       border-spacing: 0;
-      font-size: 0.875rem;
+      font-size: 0.83rem;
     }
     thead th {
       position: sticky;
       top: 0;
       z-index: 2;
-      background: var(--panel-solid);
-      color: var(--muted);
-      font-size: 0.71rem;
+      background: var(--surface);
+      color: var(--subtle);
+      font-size: 0.67rem;
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
-      padding: 0.72rem 0.75rem;
-      border-top: 1px solid var(--border);
+      letter-spacing: 0.07em;
+      padding: 0.55rem 0.8rem;
       border-bottom: 1px solid var(--border);
       text-align: left;
     }
-    thead th:first-child { border-top-left-radius: 9px; border-left: 1px solid var(--border); }
-    thead th:last-child { border-top-right-radius: 9px; border-right: 1px solid var(--border); }
+    tbody tr {
+      cursor: pointer;
+      transition: background 0.08s;
+    }
     tbody td {
       text-align: left;
-      padding: 0.82rem 0.75rem;
-      border-bottom: 1px solid rgba(148, 163, 184, 0.1);
-      vertical-align: top;
+      padding: 0.62rem 0.8rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
       overflow-wrap: anywhere;
       word-break: break-word;
     }
-    tbody tr {
-      transition: background 0.12s;
-    }
-    tbody tr:hover {
-      background: rgba(30, 41, 59, 0.38);
-    }
-    tbody tr.row-affected td:first-child {
-      box-shadow: inset 3px 0 0 var(--danger-strong);
-    }
-    tbody tr.row-affected {
-      background: rgba(244, 63, 94, 0.035);
-    }
-    tbody tr.row-affected:hover {
-      background: rgba(244, 63, 94, 0.075);
-    }
-    th:nth-child(1), td:nth-child(1) { width: 150px; }
-    th:nth-child(2), td:nth-child(2) { width: 96px; }
-    th:nth-child(3), td:nth-child(3) { width: 172px; white-space: nowrap; }
-    th:nth-child(4), td:nth-child(4) { width: 186px; }
-    th:nth-child(5), td:nth-child(5) { width: 18%; }
+    tbody tr:hover { background: var(--surface-hover); }
+    tbody tr.row-selected { background: var(--surface-selected); }
+    tbody tr.row-affected td:first-child { box-shadow: inset 3px 0 0 var(--danger-strong); }
+    tbody tr.row-investigating td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+    tbody tr.row-safe td:first-child { box-shadow: inset 3px 0 0 var(--ok); }
+
+    th:nth-child(1), td:nth-child(1) { width: 196px; }
+    th:nth-child(2), td:nth-child(2) { width: 158px; white-space: nowrap; }
+    th:nth-child(3), td:nth-child(3) { width: 148px; }
+    th:nth-child(4), td:nth-child(4) { width: 88px; }
+    th:nth-child(5), td:nth-child(5) { width: 19%; }
     th:nth-child(6), td:nth-child(6) { width: auto; }
 
+    .proof-preview {
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 0.8rem;
+      line-height: 1.4;
+    }
+    .row-meta-chips {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      margin-top: 0.25rem;
+      font-size: 0.7rem;
+      color: var(--subtle);
+    }
+    .meta-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.22rem;
+      padding: 0.06rem 0.38rem;
+      border-radius: 4px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.68rem;
+    }
+    .meta-tag.mit {
+      color: var(--accent);
+      background: var(--accent-soft);
+      border-color: var(--accent-border);
+    }
+
     code {
-      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 0.82rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.78rem;
       overflow-wrap: anywhere;
       word-break: break-word;
       white-space: pre-wrap;
     }
     .cve-code {
-      color: #e2e8f0;
+      color: var(--text);
       font-weight: 600;
-      background: rgba(30, 41, 59, 0.65);
-      padding: 0.16rem 0.48rem;
-      border-radius: 6px;
+      background: var(--code-bg);
+      padding: 0.14rem 0.44rem;
+      border-radius: 5px;
       border: 1px solid var(--border);
       display: inline-block;
       white-space: nowrap;
     }
     .just-code {
-      color: #a7f3d0;
-      background: rgba(16, 185, 129, 0.08);
-      padding: 0.16rem 0.42rem;
-      border-radius: 6px;
-      border: 1px solid rgba(16, 185, 129, 0.22);
+      color: var(--ok);
+      background: var(--ok-soft);
+      padding: 0.12rem 0.4rem;
+      border-radius: 5px;
+      border: 1px solid var(--ok-border);
       display: inline-block;
-      font-size: 0.77rem;
+      font-size: 0.74rem;
     }
 
     /* Badges */
     .badge {
       display: inline-flex;
       align-items: center;
-      gap: 0.36rem;
-      padding: 0.22rem 0.6rem;
+      gap: 0.34rem;
+      padding: 0.18rem 0.54rem;
       border-radius: 999px;
-      font-size: 0.71rem;
+      font-size: 0.68rem;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.03em;
@@ -1086,122 +1196,179 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: currentColor;
       flex-shrink: 0;
     }
-    .badge.affected { background: var(--danger-bg); color: var(--danger); border: 1px solid rgba(244, 63, 94, 0.38); }
-    .badge.not_affected { background: var(--ok-bg); color: var(--ok); border: 1px solid rgba(16, 185, 129, 0.35); }
-    .badge.under_investigation { background: var(--warn-bg); color: var(--warn); border: 1px solid rgba(245, 158, 11, 0.38); }
-    .badge.os { background: rgba(30, 41, 59, 0.8); color: var(--accent); border: 1px solid rgba(56, 189, 248, 0.25); }
+    .badge.affected { background: var(--danger-soft); color: var(--danger); border: 1px solid var(--danger-border); }
+    .badge.not_affected { background: var(--ok-soft); color: var(--ok); border: 1px solid var(--ok-border); }
+    .badge.under_investigation { background: var(--warn-soft); color: var(--warn); border: 1px solid var(--warn-border); }
+    .badge.os { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
     .badge.os::before { display: none; }
 
-    /* Mitigation command rows */
+    /* Master-Detail Slide-Over Drawer */
+    .drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      background: var(--drawer-backdrop);
+      z-index: 50;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.16s ease;
+    }
+    .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+    .detail-drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: min(620px, 94vw);
+      background: var(--surface);
+      border-left: 1px solid var(--border-strong);
+      z-index: 60;
+      display: flex;
+      flex-direction: column;
+      transform: translateX(100%);
+      transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    .detail-drawer.open { transform: translateX(0); }
+    .drawer-header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 0.75rem;
+    }
+    .drawer-title-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .drawer-sub {
+      margin-top: 0.35rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .drawer-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.1rem 1.25rem 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.1rem;
+    }
+    .drawer-section h3 {
+      margin: 0 0 0.48rem;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--subtle);
+      font-weight: 700;
+    }
+    .drawer-box {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.75rem 0.85rem;
+      font-size: 0.83rem;
+      color: var(--text-soft);
+    }
+    .drawer-footer {
+      padding: 0.65rem 1.25rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.72rem;
+      color: var(--subtle);
+      background: var(--surface);
+    }
+    .drawer-footer kbd {
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.68rem;
+      padding: 0.08rem 0.32rem;
+      border-radius: 4px;
+      border: 1px solid var(--border-strong);
+      background: var(--surface-2);
+      color: var(--muted);
+    }
+
+    /* Mitigation command rows inside drawer */
     .mit-row {
       display: flex;
       align-items: center;
-      gap: 0.45rem;
-      margin-top: 0.5rem;
+      gap: 0.42rem;
+      margin-top: 0.45rem;
       flex-wrap: wrap;
-      max-width: 100%;
     }
     .mit-cmd {
-      flex: 1 1 260px;
+      flex: 1 1 240px;
       min-width: 0;
-      max-width: 100%;
       display: block;
-      background: rgba(7, 11, 20, 0.92);
-      border: 1px solid rgba(56, 189, 248, 0.24);
-      border-radius: 8px;
-      padding: 0.42rem 0.68rem;
-      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-      font-size: 0.79rem;
-      color: #bae6fd;
+      background: var(--term-bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 7px;
+      padding: 0.45rem 0.65rem;
+      font-size: 0.78rem;
+      color: var(--term-text);
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       word-break: break-word;
     }
-    button.mini {
-      padding: 0.3rem 0.62rem;
-      font-size: 0.74rem;
-      border-radius: 7px;
-    }
+    button.mini { padding: 0.28rem 0.56rem; font-size: 0.72rem; border-radius: 6px; }
 
-    /* Probe details drawer */
-    details.probe-drawer {
-      margin-top: 0.52rem;
-    }
-    details.probe-drawer summary {
-      cursor: pointer;
-      font-size: 0.78rem;
-      color: var(--accent);
-      font-weight: 600;
-      user-select: none;
-      list-style: none;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      padding: 0.2rem 0.45rem;
-      border-radius: 6px;
-      background: rgba(56, 189, 248, 0.08);
-      border: 1px solid rgba(56, 189, 248, 0.18);
-      transition: background 0.15s;
-    }
-    details.probe-drawer summary::-webkit-details-marker { display: none; }
-    details.probe-drawer summary::before {
-      content: "▸";
-      font-size: 0.72rem;
-      transition: transform 0.15s;
-    }
-    details.probe-drawer[open] summary::before {
-      transform: rotate(90deg);
-    }
-    details.probe-drawer summary:hover {
-      background: rgba(56, 189, 248, 0.15);
-    }
+    /* Probe timeline cards inside drawer */
     .probe-item {
-      margin-top: 0.48rem;
-      padding: 0.55rem 0.75rem;
-      background: rgba(7, 11, 20, 0.85);
+      margin-top: 0.45rem;
+      padding: 0.6rem 0.78rem;
+      background: var(--surface-2);
       border: 1px solid var(--border);
       border-left: 3px solid var(--border-strong);
-      border-radius: 8px;
-      font-size: 0.8rem;
+      border-radius: 7px;
+      font-size: 0.79rem;
     }
     .probe-item.st-not_met { border-left-color: var(--ok); }
-    .probe-item.st-met { border-left-color: var(--danger); }
+    .probe-item.st-met { border-left-color: var(--danger-strong); }
     .probe-item.st-unknown { border-left-color: var(--warn); }
 
-    /* Briefing box */
+    /* Briefing pane */
+    .briefing-pane { padding: 1.05rem 1.2rem; }
+    .briefing-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+      gap: 0.75rem;
+    }
+    .briefing-header h2 { margin: 0; font-size: 0.94rem; font-weight: 700; }
     pre.briefing {
-      background: rgba(7, 11, 20, 0.88);
+      background: var(--surface-2);
       border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 1.05rem 1.15rem;
+      border-radius: 9px;
+      padding: 1rem 1.1rem;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       word-break: break-word;
-      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 0.83rem;
-      line-height: 1.6;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.81rem;
+      line-height: 1.62;
       color: var(--text-soft);
       margin: 0;
     }
-
-    /* Hidden select synced with segmented buttons for backward compatibility */
-    .sr-select {
-      display: none;
-    }
+    .pane-hidden { display: none; }
+    .sr-select { display: none; }
   </style>
 </head>
 <body>
   <header>
     <div class="brand">
       <div class="brand-logo" aria-hidden="true">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f08a59" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
           <path d="m9 12 2 2 4-4"/>
         </svg>
       </div>
       <div class="brand-title">
         <h1>notaffected</h1>
-        <span class="brand-sub">Deterministic Reachability &amp; OpenVEX Engine</span>
+        <span class="brand-sub">Reachability &amp; OpenVEX</span>
       </div>
       <span class="pill accent" id="verPill">v1.0.0</span>
       <span class="pill" id="dockerCountPill">Docker Targets: ...</span>
@@ -1210,7 +1377,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="btn-row">
       <button class="ghost" id="btnExportVex" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        OpenVEX (.vex.json)
+        OpenVEX
       </button>
       <button class="ghost" id="btnExportJson" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -1220,44 +1387,71 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
         HTML Report
       </button>
+      <button class="ghost icon-btn" id="btnThemeToggle" type="button" title="Toggle Dark / Light theme" aria-label="Toggle Dark or Light theme">
+        <svg id="themeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      </button>
     </div>
   </header>
 
   <main>
-    <div class="controls-shell">
-      <div class="controls-grid">
-        <div class="field">
-          <label for="targetMode">1. Target Fleet</label>
+    <div class="toolbar-card">
+      <div class="toolbar-row">
+        <div class="toolbar-field">
+          <label for="targetMode">Target</label>
           <select id="targetMode">
             <option value="docker_discovered">Running Docker Lab Containers (Auto-Discover)</option>
             <option value="lab_inventory">Lab Inventory (lab/inventory.yaml)</option>
             <option value="custom_inventory">Custom Inventory (inventory.yaml)</option>
             <option value="demo_fleet">Simulated Demo Fleet (3 Linux + 2 Windows Server)</option>
             <option value="local">Local Machine (localhost)</option>
-            <option value="custom_target">Custom Target (Single Docker Container / SSH Host)</option>
+            <option value="custom_target">Custom Target (Single Docker / SSH Host)</option>
           </select>
         </div>
 
+        <div class="toolbar-field">
+          <label for="scanMode">Mode</label>
+          <select id="scanMode">
+            <option value="live_scan">Auto-Scan (Built-in + OSV + CISA KEV)</option>
+            <option value="custom_cves">Specific CVE ID(s)</option>
+            <option value="scanner_json">Filter Trivy / Grype JSON Report</option>
+          </select>
+        </div>
+
+        <div class="btn-row">
+          <button class="primary" id="btnRun">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            Run Reachability Proof
+          </button>
+          <button id="btnResetLab" title="Restore Demo Fleet and Docker Lab containers to initial vulnerable state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+            Reset Lab
+          </button>
+        </div>
+
+        <div class="toggles-group">
+          <label class="switch-label">
+            <input type="checkbox" id="chkOffline" />
+            <span>Offline</span>
+          </label>
+          <label class="switch-label">
+            <input type="checkbox" id="chkUseLlm" />
+            <span>AI Advisor</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="toolbar-extras">
         <div class="field" id="customTargetField" style="display:none;">
           <label for="customTargetValue">Custom Target Type &amp; Address</label>
           <div style="display:flex; gap:0.5rem;">
-            <select id="customTargetType" style="width:48%;">
+            <select id="customTargetType" style="width:45%;">
               <option value="docker_linux">Docker (Linux)</option>
               <option value="docker_windows">Docker (Win-Sim)</option>
               <option value="ssh_linux">SSH (Linux)</option>
               <option value="ssh_windows">SSH (Windows)</option>
             </select>
-            <input type="text" id="customTargetValue" placeholder="e.g. lab-ssh-vuln or ubuntu@10.0.0.15" value="lab-ssh-vuln" style="width:52%;" />
+            <input type="text" id="customTargetValue" placeholder="e.g. lab-ssh-vuln or ubuntu@10.0.0.15" value="lab-ssh-vuln" style="width:55%;" />
           </div>
-        </div>
-
-        <div class="field">
-          <label for="scanMode">2. Evaluation Mode</label>
-          <select id="scanMode">
-            <option value="live_scan">Auto-Scan (Built-in + Live OSV Packages + CISA KEV Feed)</option>
-            <option value="custom_cves">Specific CVE ID(s)</option>
-            <option value="scanner_json">Filter Trivy / Grype JSON Report</option>
-          </select>
         </div>
 
         <div class="field" id="customCveField" style="display:none;">
@@ -1267,31 +1461,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
         <div class="field" id="scannerJsonField" style="display:none;">
           <label for="scannerFileInput">Trivy / Grype JSON File (leave empty for examples/trivy-scan.json)</label>
-          <input type="file" id="scannerFileInput" accept=".json,application/json" style="color:var(--muted); font-size:0.84rem;" />
-        </div>
-      </div>
-
-      <div class="controls-footer">
-        <div class="btn-row">
-          <button class="primary" id="btnRun">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            Run Reachability Proof
-          </button>
-          <button id="btnResetLab" title="Restore Demo Fleet and Docker Lab containers to initial vulnerable state">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-            Reset Lab / Demo
-          </button>
-        </div>
-
-        <div class="toggles-group">
-          <label class="switch-label">
-            <input type="checkbox" id="chkOffline" />
-            <span>Offline Only (Skip Live Feeds)</span>
-          </label>
-          <label class="switch-label">
-            <input type="checkbox" id="chkUseLlm" />
-            <span>Use AI Advisor</span>
-          </label>
+          <input type="file" id="scannerFileInput" accept=".json,application/json" style="color:var(--muted); font-size:0.8rem;" />
         </div>
       </div>
     </div>
@@ -1299,46 +1469,54 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="feed-banner" id="feedBanner">Ready. Click "Run Reachability Proof" to evaluate targets.</div>
 
     <div class="kpi-grid">
-      <div class="kpi-card kpi-danger clickable" id="kpiAffectedCard" data-kpi-filter="affected" title="Filter Affected verdicts">
-        <div class="kpi-top">
-          <div class="label">Affected (Action Required)</div>
-        </div>
+      <div class="kpi-card clickable" id="kpiAffectedCard" data-kpi-filter="affected" tabindex="0" role="button" title="Filter Affected verdicts">
+        <div class="label">Affected (Action Required)</div>
         <div class="val danger" id="kpiAffected">0</div>
       </div>
-      <div class="kpi-card kpi-ok clickable" data-kpi-filter="not_affected" title="Filter Not Affected verdicts">
-        <div class="kpi-top">
-          <div class="label">Not Affected (VEX Proven)</div>
-        </div>
+      <div class="kpi-card clickable" data-kpi-filter="not_affected" tabindex="0" role="button" title="Filter Not Affected verdicts">
+        <div class="label">Not Affected (VEX Proven)</div>
         <div class="val ok" id="kpiNotAffected">0</div>
       </div>
-      <div class="kpi-card kpi-warn clickable" data-kpi-filter="under_investigation" title="Filter Under Investigation verdicts">
-        <div class="kpi-top">
-          <div class="label">Under Investigation</div>
-        </div>
+      <div class="kpi-card clickable" data-kpi-filter="under_investigation" tabindex="0" role="button" title="Filter Under Investigation verdicts">
+        <div class="label">Under Investigation</div>
         <div class="val warn" id="kpiUnderInv">0</div>
       </div>
-      <div class="kpi-card kpi-accent">
-        <div class="kpi-top">
-          <div class="label">False-Positive Noise Cut</div>
-        </div>
+      <div class="kpi-card">
+        <div class="label">False-Positive Noise Cut</div>
         <div class="val accent" id="kpiNoise">0%</div>
         <div class="kpi-bar"><div class="kpi-bar-fill" id="noiseBar"></div></div>
       </div>
-      <div class="kpi-card kpi-muted clickable" data-kpi-filter="all" title="Show all verdicts">
-        <div class="kpi-top">
-          <div class="label">Total Host-CVE Proofs</div>
-        </div>
+      <div class="kpi-card kpi-muted clickable" data-kpi-filter="all" tabindex="0" role="button" title="Show all verdicts">
+        <div class="label">Total Host-CVE Proofs</div>
         <div class="val" id="kpiTotal">0</div>
       </div>
     </div>
 
-    <div class="section-card">
-      <div class="section-header">
-        <div class="section-title-wrap">
-          <h2>Host Reachability Verdicts &amp; Deterministic Proofs</h2>
+    <div class="dist-card" aria-label="Verdict distribution">
+      <span class="dist-title">Verdict Split</span>
+      <div class="dist-track">
+        <div class="dist-seg aff" id="distAff" style="width:0%"></div>
+        <div class="dist-seg inv" id="distInv" style="width:0%"></div>
+        <div class="dist-seg ok" id="distOk" style="width:0%"></div>
+      </div>
+      <div class="dist-legend">
+        <span><i class="dist-dot" style="background:var(--danger-strong)"></i><b id="distAffLbl">0</b> Affected</span>
+        <span><i class="dist-dot" style="background:var(--warn)"></i><b id="distInvLbl">0</b> Investigating</span>
+        <span><i class="dist-dot" style="background:var(--ok)"></i><b id="distOkLbl">0</b> Proven Safe</span>
+      </div>
+    </div>
+
+    <div class="workspace-card">
+      <div class="workspace-tabs">
+        <div style="display:flex; align-items:center; gap:0.55rem; flex-wrap:wrap;">
+          <div class="tab-strip" role="tablist">
+            <button type="button" class="tab-btn active" data-tab="verdicts" role="tab" aria-selected="true">Host Verdicts</button>
+            <button type="button" class="tab-btn" data-tab="briefing" role="tab" aria-selected="false">Operational Briefing</button>
+          </div>
           <span class="count-chip" id="rowCountChip">0 rows</span>
         </div>
-        <div class="filter-bar">
+
+        <div class="filter-bar" id="verdictsFilterBar">
           <div class="seg-group" id="statusSegments" role="group" aria-label="Filter by verdict status">
             <button type="button" class="seg-btn active" data-status="attention" title="Affected and under investigation">Needs Attention</button>
             <button type="button" class="seg-btn" data-status="all">All</button>
@@ -1354,53 +1532,120 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <option value="under_investigation">Under Investigation</option>
           </select>
           <select id="filterOs" aria-label="OS family filter">
-            <option value="all">All OS Families</option>
+            <option value="all">All OS</option>
             <option value="linux">Linux</option>
             <option value="windows">Windows Server</option>
           </select>
           <div class="search-wrap">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             <input type="text" id="filterSearch" placeholder="Filter host, CVE, proof..." />
+            <span class="kbd-hint">/</span>
           </div>
         </div>
       </div>
 
-      <div class="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>Host</th>
-            <th>OS</th>
-            <th>CVE ID</th>
-            <th>Verdict</th>
-            <th>VEX Justification / Patch Status</th>
-            <th>Deterministic System Proof &amp; Temporary Mitigations</th>
-          </tr>
-        </thead>
-        <tbody id="verdictsBody">
-          <tr><td colspan="6" style="color:var(--muted);">Loading initial evaluation...</td></tr>
-        </tbody>
-      </table>
+      <div id="tabPaneVerdicts">
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Verdict</th>
+                <th>CVE ID</th>
+                <th>Host</th>
+                <th>OS</th>
+                <th>Patch / VEX</th>
+                <th>Deterministic Proof (Click row to inspect)</th>
+              </tr>
+            </thead>
+            <tbody id="verdictsBody">
+              <tr><td colspan="6" style="color:var(--muted);">Loading initial evaluation...</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
-    </div>
 
-    <div class="section-card">
-      <div class="section-header">
-        <h2>Operational Risk &amp; Remediation Safety Briefing</h2>
-        <button type="button" class="ghost" id="btnCopyBriefing">Copy Briefing</button>
+      <div id="tabPaneBriefing" class="briefing-pane pane-hidden">
+        <div class="briefing-header">
+          <h2>Operational Risk &amp; Remediation Safety Briefing</h2>
+          <button type="button" class="ghost" id="btnCopyBriefing">Copy Briefing</button>
+        </div>
+        <pre class="briefing" id="briefingBox">Run an evaluation to view host-aware remediation guidance.</pre>
       </div>
-      <pre class="briefing" id="briefingBox">Run an evaluation to view host-aware remediation guidance.</pre>
     </div>
   </main>
+
+  <!-- Master-Detail Inspector Drawer -->
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <aside class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-label="Verdict Inspector">
+    <div class="drawer-header">
+      <div>
+        <div class="drawer-title-row" id="drawerTitleRow"></div>
+        <div class="drawer-sub" id="drawerSub"></div>
+      </div>
+      <button type="button" class="ghost icon-btn" id="btnCloseDrawer" title="Close (Esc)" aria-label="Close inspector">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="drawer-body" id="drawerBody"></div>
+    <div class="drawer-footer">
+      <span>Navigate rows: <kbd>↑</kbd> <kbd>↓</kbd> · Close: <kbd>Esc</kbd></span>
+      <span id="drawerIndexLabel"></span>
+    </div>
+  </aside>
 
   <script>
     const PAGE_TOKEN = document.querySelector('meta[name="notaffected-token"]').content;
     let latestResult = null;
+    let currentFiltered = [];
+    let selectedIdx = -1;
     let activeTargetConfig = {
       target_mode: "docker_discovered",
       custom_target_type: "docker_linux",
       custom_target_value: "lab-ssh-vuln",
     };
+
+    const STATUS_LABEL = {
+      affected: "Affected",
+      not_affected: "Not affected",
+      under_investigation: "Under investigation",
+    };
+
+    /* Theme persistence (Dark default) */
+    function applyTheme(theme) {
+      const next = theme === "light" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      try { localStorage.setItem("notaffected-theme", next); } catch (_) {}
+      const icon = document.getElementById("themeIcon");
+      if (icon) {
+        icon.innerHTML = next === "dark"
+          ? '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>'
+          : '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+      }
+    }
+    try {
+      const saved = localStorage.getItem("notaffected-theme");
+      if (saved === "dark" || saved === "light") applyTheme(saved);
+    } catch (_) {}
+    document.getElementById("btnThemeToggle").addEventListener("click", () => {
+      const cur = document.documentElement.getAttribute("data-theme");
+      applyTheme(cur === "dark" ? "light" : "dark");
+    });
+
+    /* Workspace tabs */
+    function setActiveTab(tabName) {
+      const isVerdicts = tabName !== "briefing";
+      document.getElementById("tabPaneVerdicts").classList.toggle("pane-hidden", !isVerdicts);
+      document.getElementById("tabPaneBriefing").classList.toggle("pane-hidden", isVerdicts);
+      document.getElementById("verdictsFilterBar").style.display = isVerdicts ? "flex" : "none";
+      document.querySelectorAll(".tab-btn").forEach((b) => {
+        const active = b.getAttribute("data-tab") === (isVerdicts ? "verdicts" : "briefing");
+        b.classList.toggle("active", active);
+        b.setAttribute("aria-selected", active ? "true" : "false");
+      });
+    }
+    document.querySelectorAll(".tab-btn").forEach((b) => {
+      b.addEventListener("click", () => setActiveTab(b.getAttribute("data-tab")));
+    });
 
     function esc(s) {
       return String(s == null ? "" : s)
@@ -1424,11 +1669,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     function setStatusFilter(val) {
+      setActiveTab("verdicts");
       const sel = document.getElementById("filterStatus");
       sel.value = val;
       document.querySelectorAll("#statusSegments .seg-btn").forEach((b) => {
         b.classList.toggle("active", b.getAttribute("data-status") === val);
       });
+      closeDrawer();
       renderVerdictRows();
     }
 
@@ -1437,6 +1684,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     });
     document.querySelectorAll(".kpi-card[data-kpi-filter]").forEach((card) => {
       card.addEventListener("click", () => setStatusFilter(card.getAttribute("data-kpi-filter")));
+      card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          setStatusFilter(card.getAttribute("data-kpi-filter"));
+        }
+      });
     });
 
     document.getElementById("targetMode").addEventListener("change", (e) => {
@@ -1449,6 +1702,162 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         e.target.value === "custom_cves" ? "block" : "none";
       document.getElementById("scannerJsonField").style.display =
         e.target.value === "scanner_json" ? "block" : "none";
+    });
+
+    /* Master-Detail Inspector Drawer */
+    let lastFocusedBeforeDrawer = null;
+    function closeDrawer() {
+      selectedIdx = -1;
+      document.getElementById("detailDrawer").classList.remove("open");
+      document.getElementById("drawerBackdrop").classList.remove("open");
+      document.querySelectorAll("#verdictsBody tr.row-selected").forEach((r) => r.classList.remove("row-selected"));
+      if (lastFocusedBeforeDrawer && typeof lastFocusedBeforeDrawer.focus === "function") {
+        lastFocusedBeforeDrawer.focus();
+        lastFocusedBeforeDrawer = null;
+      }
+    }
+
+    function openDrawer(idx) {
+      if (idx < 0 || idx >= currentFiltered.length) return;
+      if (selectedIdx < 0) lastFocusedBeforeDrawer = document.activeElement;
+      selectedIdx = idx;
+      const v = currentFiltered[idx];
+      const specById = {};
+      for (const sp of (latestResult && latestResult.specs ? latestResult.specs : [])) {
+        if (sp && sp.cve_id) specById[sp.cve_id] = sp;
+      }
+      const spec = specById[v.cve_id] || null;
+
+      document.querySelectorAll("#verdictsBody tr").forEach((r, i) => {
+        const isSel = i === idx;
+        r.classList.toggle("row-selected", isSel);
+        if (isSel) r.scrollIntoView({ block: "nearest" });
+      });
+
+      document.getElementById("drawerTitleRow").innerHTML = `
+        <span class="badge ${esc(v.status)}">${esc(STATUS_LABEL[v.status] || v.status)}</span>
+        <code class="cve-code">${esc(v.cve_id)}</code>
+        <span class="badge os">${esc(v.os_family)}</span>
+      `;
+      document.getElementById("drawerSub").innerHTML =
+        `Host: <strong style="color:var(--text);">${esc(v.host)}</strong>` +
+        (spec ? ` · Source: <code>${esc(spec.source)}</code> · Confidence: <code>${esc(spec.confidence)}</code> · Severity: <code>${esc(spec.severity)}</code>` : "");
+      document.getElementById("drawerIndexLabel").textContent = `${idx + 1} / ${currentFiltered.length}`;
+
+      const justOrPatch = v.status === "not_affected"
+        ? `VEX Justification: <code class="just-code">${esc(v.justification || "not_affected")}</code>`
+        : `Patch status: <strong>${esc(v.patch ? v.patch.status : "unknown")}</strong>` +
+          (v.patch && v.patch.fixed_version ? ` · Fixed: <code>${esc(v.patch.fixed_version)}</code>` : "");
+
+      const mitSection = (v.status === "affected" && v.mitigation && v.mitigation.length > 0)
+        ? `
+          <div class="drawer-section">
+            <h3>Temporary Mitigations (${v.mitigation.length})</h3>
+            ${v.mitigation.map((m, mIdx) => {
+              const low = String(m || "").trim().toLowerCase();
+              const canRun = (
+                low.startsWith("sudo ") ||
+                low.startsWith("echo ") ||
+                low.startsWith("set-itemproperty ") ||
+                low.startsWith("stop-service ") ||
+                low.startsWith("set-service ")
+              );
+              const runBtn = canRun
+                ? `<button type="button" class="mini caution" data-apply-host="${esc(v.host)}" data-apply-cve="${esc(v.cve_id)}" data-apply-idx="${mIdx}" data-apply-cmd="${esc(m)}" title="Applies temporary mitigation and re-verifies host">Run Mitigation</button>`
+                : "";
+              return `
+                <div class="mit-row">
+                  <code class="mit-cmd">$ ${esc(m)}</code>
+                  <button type="button" class="mini primary" data-copy-cmd="${esc(m)}">Copy</button>
+                  ${runBtn}
+                </div>
+              `;
+            }).join("")}
+          </div>
+        `
+        : "";
+
+      const probes = v.probe_results || [];
+      let probesHtml = "";
+      if (probes.length > 0) {
+        probesHtml = probes.map((pr, pIdx) => {
+          const pSt = String(pr.status || "UNKNOWN");
+          const pLow = pSt.toLowerCase();
+          const pColor = pSt === "NOT_MET" ? "var(--ok)" : (pSt === "MET" ? "var(--danger)" : "var(--warn)");
+          const pName = pr.precondition ? pr.precondition.probe : "probe";
+          const pDesc = pr.precondition ? pr.precondition.description : "";
+          return `
+            <div class="probe-item st-${esc(pLow)}">
+              <div>
+                <strong style="color:${pColor};">#${pIdx + 1} [${esc(pSt)}]</strong>
+                <code>${esc(pName)}</code> &mdash; <span style="color:var(--muted);">${esc(pDesc)}</span>
+              </div>
+              <div style="margin-top:0.25rem; color:var(--text-soft);">Command: <code>${esc(pr.command || "n/a")}</code></div>
+              <div style="margin-top:0.18rem; color:var(--muted);">Output: ${esc(pr.evidence || "")}</div>
+            </div>
+          `;
+        }).join("");
+      } else if (spec && spec.preconditions && spec.preconditions.length > 0) {
+        probesHtml = `<div class="drawer-box">` + spec.preconditions.map((pre, pIdx) => `
+          <div style="margin-top:${pIdx ? "0.35rem" : "0"}; font-size:0.79rem; color:var(--muted);">
+            #${pIdx + 1} <code>${esc(pre.probe)}</code>: ${esc(pre.description)} (skipped due to OS mismatch)
+          </div>
+        `).join("") + `</div>`;
+      } else {
+        probesHtml = `<div class="drawer-box" style="color:var(--muted);">No deterministic preconditions available for this advisory.</div>`;
+      }
+
+      document.getElementById("drawerBody").innerHTML = `
+        <div class="drawer-section">
+          <h3>Deterministic Proof</h3>
+          <div class="drawer-box">
+            <div>${esc(v.reason)}</div>
+            <div style="margin-top:0.55rem; padding-top:0.5rem; border-top:1px solid var(--border); font-size:0.79rem;">${justOrPatch}</div>
+          </div>
+        </div>
+        ${mitSection}
+        ${spec ? `
+          <div class="drawer-section">
+            <h3>Advisory Summary</h3>
+            <div class="drawer-box">${esc(spec.summary)}</div>
+          </div>
+        ` : ""}
+        <div class="drawer-section">
+          <h3>Inspect Probes &amp; Commands (${probes.length})</h3>
+          ${probesHtml}
+        </div>
+      `;
+
+      document.getElementById("detailDrawer").classList.add("open");
+      document.getElementById("drawerBackdrop").classList.add("open");
+    }
+
+    document.getElementById("btnCloseDrawer").addEventListener("click", closeDrawer);
+    document.getElementById("drawerBackdrop").addEventListener("click", closeDrawer);
+
+    /* Keyboard shortcuts: '/' search, Esc close drawer, ArrowUp/Down navigate rows */
+    document.addEventListener("keydown", (e) => {
+      const tag = (document.activeElement && document.activeElement.tagName || "").toLowerCase();
+      const inInput = tag === "input" || tag === "textarea" || tag === "select";
+      if (e.key === "/" && !inInput) {
+        e.preventDefault();
+        setActiveTab("verdicts");
+        document.getElementById("filterSearch").focus();
+        return;
+      }
+      if (e.key === "Escape") {
+        closeDrawer();
+        return;
+      }
+      if (!inInput && selectedIdx >= 0) {
+        if (e.key === "ArrowDown" && selectedIdx + 1 < currentFiltered.length) {
+          e.preventDefault();
+          openDrawer(selectedIdx + 1);
+        } else if (e.key === "ArrowUp" && selectedIdx > 0) {
+          e.preventDefault();
+          openDrawer(selectedIdx - 1);
+        }
+      }
     });
 
     async function loadMeta() {
@@ -1480,14 +1889,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           if (!ai.configured) {
             aiPill.innerHTML = `<span class="status-dot"></span>AI: not configured`;
             aiPill.title = [ai.provider ? ai.provider + ": " + (ai.detail || "") : (ai.detail || ""), setupHint].join(" ").trim();
-            aiPill.style.color = "var(--muted)";
           } else {
             const scope = ai.local_only ? "local" : "external";
             const unreachable = ai.online === false;
-            const checked = ai.online === true;  // null: configured, but nothing was sent to check it
+            const checked = ai.online === true;
             aiPill.innerHTML = `<span class="status-dot ${unreachable ? "warn" : checked ? "ok" : ""}"></span>AI: ${esc(ai.provider)} · ${esc(ai.model)} (${scope}${unreachable ? ", unreachable" : ""})`;
             aiPill.title = unreachable ? (ai.detail || "") : checked ? "" : "Configured; not contacted until the AI advisor runs.";
-            aiPill.style.color = unreachable ? "var(--warn)" : checked ? "var(--ok)" : "";
           }
         }
       } catch (err) {
@@ -1499,20 +1906,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const tbody = document.getElementById("verdictsBody");
       const chip = document.getElementById("rowCountChip");
       if (!latestResult || !latestResult.verdicts) {
+        currentFiltered = [];
         if (chip) chip.textContent = "0 rows";
         tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);">No verdicts available.</td></tr>';
         return;
-      }
-      const specById = {};
-      for (const sp of (latestResult.specs || [])) {
-        if (sp && sp.cve_id) specById[sp.cve_id] = sp;
       }
       const stFilter = document.getElementById("filterStatus").value;
       const osFilter = document.getElementById("filterOs").value;
       const q = (document.getElementById("filterSearch").value || "").toLowerCase();
 
       const statusRank = { affected: 0, under_investigation: 1, not_affected: 2 };
-      const filtered = latestResult.verdicts
+      currentFiltered = latestResult.verdicts
         .filter((v) => {
           if (stFilter === "attention") {
             if (v.status === "not_affected") return false;
@@ -1528,111 +1932,40 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         })
         .sort((a, b) => (statusRank[a.status] ?? 9) - (statusRank[b.status] ?? 9));
 
-      if (chip) chip.textContent = `${filtered.length} / ${latestResult.verdicts.length} rows`;
+      if (chip) chip.textContent = `${currentFiltered.length} / ${latestResult.verdicts.length} rows`;
 
-      if (filtered.length === 0) {
+      if (currentFiltered.length === 0) {
         const emptyMsg = stFilter === "attention" && !q && osFilter === "all"
           ? "Nothing needs attention: every host-CVE pair is proven not affected."
           : "No matching verdicts for current filter.";
         tbody.innerHTML = `<tr><td colspan="6" style="color:var(--muted);">${esc(emptyMsg)}</td></tr>`;
         return;
       }
-      const statusLabel = { affected: "Affected", not_affected: "Not affected", under_investigation: "Under investigation" };
 
-      tbody.innerHTML = filtered.map((v) => {
-        const spec = specById[v.cve_id] || null;
+      tbody.innerHTML = currentFiltered.map((v, idx) => {
         const justOrPatch = v.status === "not_affected"
           ? `<code class="just-code">${esc(v.justification || "not_affected")}</code>`
-          : `Patch: <strong>${esc(v.patch ? v.patch.status : "unknown")}</strong>` +
-            (v.patch && v.patch.fixed_version ? ` (<code>${esc(v.patch.fixed_version)}</code>)` : "");
-        const mitigationsHtml = (v.status === "affected" && v.mitigation && v.mitigation.length > 0)
-          ? v.mitigation.map((m, idx) => {
-              const low = String(m || "").trim().toLowerCase();
-              const canRun = (
-                low.startsWith("sudo ") ||
-                low.startsWith("echo ") ||
-                low.startsWith("set-itemproperty ") ||
-                low.startsWith("stop-service ") ||
-                low.startsWith("set-service ")
-              );
-              const runBtn = canRun
-                ? `<button type="button" class="mini caution" data-apply-host="${esc(v.host)}" data-apply-cve="${esc(v.cve_id)}" data-apply-idx="${idx}" data-apply-cmd="${esc(m)}" title="Changes the host (lab containers only)">Run Mitigation</button>`
-                : "";
-              return `
-                <div class="mit-row">
-                  <code class="mit-cmd">$ ${esc(m)}</code>
-                  <button type="button" class="mini primary" data-copy-cmd="${esc(m)}">Copy</button>
-                  ${runBtn}
-                </div>
-              `;
-            }).join("")
-          : "";
-        const mitigationsBlock = mitigationsHtml
-          ? `
-            <details class="probe-drawer">
-              <summary>Temporary Mitigations (${v.mitigation.length})</summary>
-              ${mitigationsHtml}
-            </details>
-          `
-          : "";
+          : `<strong>${esc(v.patch ? v.patch.status : "unknown")}</strong>` +
+            (v.patch && v.patch.fixed_version ? ` <span style="color:var(--subtle);">(${esc(v.patch.fixed_version)})</span>` : "");
+        const probeCount = (v.probe_results || []).length;
+        const mitCount = (v.status === "affected" && v.mitigation) ? v.mitigation.length : 0;
+        const rowClass = v.status === "affected"
+          ? "row-affected"
+          : (v.status === "under_investigation" ? "row-investigating" : "row-safe");
 
-        const probes = v.probe_results || [];
-        let probeListHtml = "";
-        if (probes.length > 0) {
-          probeListHtml = probes.map((pr, idx) => {
-            const pSt = String(pr.status || "UNKNOWN");
-            const pLow = pSt.toLowerCase();
-            const pColor = pSt === "NOT_MET" ? "var(--ok)" : (pSt === "MET" ? "var(--danger)" : "var(--warn)");
-            const pName = pr.precondition ? pr.precondition.probe : "probe";
-            const pDesc = pr.precondition ? pr.precondition.description : "";
-            return `
-              <div class="probe-item st-${esc(pLow)}">
-                <div>
-                  <strong style="color:${pColor};">#${idx + 1} [${esc(pSt)}]</strong>
-                  <code>${esc(pName)}</code> &mdash; <span style="color:var(--muted);">${esc(pDesc)}</span>
-                </div>
-                <div style="margin-top:0.25rem; color:var(--text-soft);">Command: <code>${esc(pr.command || "n/a")}</code></div>
-                <div style="margin-top:0.18rem; color:var(--muted);">Output: ${esc(pr.evidence || "")}</div>
-              </div>
-            `;
-          }).join("");
-        } else if (spec && spec.preconditions && spec.preconditions.length > 0) {
-          probeListHtml = spec.preconditions.map((pre, idx) => `
-            <div style="margin-top:0.35rem; font-size:0.8rem; color:var(--muted);">
-              #${idx + 1} <code>${esc(pre.probe)}</code>: ${esc(pre.description)} (skipped due to OS mismatch)
-            </div>
-          `).join("");
-        } else {
-          probeListHtml = `<div style="margin-top:0.35rem; font-size:0.8rem; color:var(--muted);">No deterministic preconditions available for this advisory.</div>`;
-        }
-
-        const specMeta = spec
-          ? `Rule source: ${esc(spec.source)} | Confidence: ${esc(spec.confidence)} | Severity: ${esc(spec.severity)}`
-          : "";
-        const inspectDrawer = `
-          <details class="probe-drawer">
-            <summary>
-              Inspect Probes &amp; Commands (${probes.length} executed${specMeta ? " — " + specMeta : ""})
-            </summary>
-            <div style="margin-top:0.4rem;">
-              ${spec ? `<div style="font-size:0.81rem; color:var(--text-soft); margin-bottom:0.35rem;"><strong>Advisory:</strong> ${esc(spec.summary)}</div>` : ""}
-              ${probeListHtml}
-            </div>
-          </details>
-        `;
-
-        const rowClass = v.status === "affected" ? ' class="row-affected"' : "";
         return `
-          <tr${rowClass}>
+          <tr class="${rowClass}" data-row-idx="${idx}" tabindex="0">
+            <td><span class="badge ${esc(v.status)}">${esc(STATUS_LABEL[v.status] || v.status)}</span></td>
+            <td><code class="cve-code">${esc(v.cve_id)}</code></td>
             <td><strong>${esc(v.host)}</strong></td>
             <td><span class="badge os">${esc(v.os_family)}</span></td>
-            <td><code class="cve-code">${esc(v.cve_id)}</code></td>
-            <td><span class="badge ${esc(v.status)}">${esc(statusLabel[v.status] || v.status)}</span></td>
             <td>${justOrPatch}</td>
             <td>
-              <div>${esc(v.reason)}</div>
-              ${mitigationsBlock}
-              ${inspectDrawer}
+              <div class="proof-preview">${esc(v.reason)}</div>
+              <div class="row-meta-chips">
+                <span class="meta-tag">${probeCount} probe${probeCount === 1 ? "" : "s"}</span>
+                ${mitCount > 0 ? `<span class="meta-tag mit">${mitCount} mitigation${mitCount === 1 ? "" : "s"}</span>` : ""}
+              </div>
             </td>
           </tr>
         `;
@@ -1643,8 +1976,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const btn = document.getElementById("btnRun");
       const origHtml = btn.innerHTML;
       btn.disabled = true;
-      btn.textContent = "Probing targets...";
+      btn.textContent = "Probing...";
       document.getElementById("feedBanner").textContent = "Executing read-only system probes and live CVE checks...";
+      closeDrawer();
 
       const body = {
         target_mode: document.getElementById("targetMode").value,
@@ -1675,15 +2009,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         });
         latestResult = await res.json();
         const s = latestResult.summary || {};
-        document.getElementById("kpiTotal").textContent = s.total || 0;
-        document.getElementById("kpiAffected").textContent = s.affected || 0;
-        document.getElementById("kpiAffectedCard").classList.toggle("kpi-hot", (s.affected || 0) > 0);
-        document.getElementById("kpiNotAffected").textContent = s.not_affected || 0;
-        document.getElementById("kpiUnderInv").textContent = s.under_investigation || 0;
+        const total = Number(s.total || 0);
+        const aff = Number(s.affected || 0);
+        const ok = Number(s.not_affected || 0);
+        const inv = Number(s.under_investigation || 0);
+
+        document.getElementById("kpiTotal").textContent = total;
+        document.getElementById("kpiAffected").textContent = aff;
+        document.getElementById("kpiAffectedCard").classList.toggle("kpi-hot", aff > 0);
+        document.getElementById("kpiNotAffected").textContent = ok;
+        document.getElementById("kpiUnderInv").textContent = inv;
         const noisePct = s.noise_reduction_pct || 0;
         document.getElementById("kpiNoise").textContent = noisePct + "%";
         const noiseBar = document.getElementById("noiseBar");
         if (noiseBar) noiseBar.style.width = Math.max(0, Math.min(100, Number(noisePct))) + "%";
+
+        const denom = total || 1;
+        document.getElementById("distAff").style.width = ((aff / denom) * 100).toFixed(1) + "%";
+        document.getElementById("distInv").style.width = ((inv / denom) * 100).toFixed(1) + "%";
+        document.getElementById("distOk").style.width = ((ok / denom) * 100).toFixed(1) + "%";
+        document.getElementById("distAffLbl").textContent = aff;
+        document.getElementById("distInvLbl").textContent = inv;
+        document.getElementById("distOkLbl").textContent = ok;
+
         document.getElementById("briefingBox").textContent = latestResult.briefing || "";
 
         const fm = latestResult.feed_meta || {};
@@ -1692,12 +2040,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           bannerEl.style.color = "var(--danger)";
           bannerEl.textContent = "Notice: " + fm.error;
         } else {
-          bannerEl.style.color = "var(--muted)";
+          bannerEl.style.color = "var(--subtle)";
           const osvCount = (fm.osv_live_cves || []).length;
           const kevCount = (fm.cisa_kev_cves || []).length;
           bannerEl.textContent =
-            `Evaluated ${s.hosts_evaluated || 0} host(s) across ${s.cves_evaluated || 0} CVE(s) ` +
-            `[Built-in rules: ${fm.builtin_count || 0} | Live OSV package CVEs: ${osvCount} | Live CISA KEV CVEs: ${kevCount}]`;
+            `Evaluated ${s.hosts_evaluated || 0} host(s) across ${s.cves_evaluated || 0} CVE(s) · ` +
+            `Built-in: ${fm.builtin_count || 0} · Live OSV: ${osvCount} · CISA KEV: ${kevCount}`;
         }
 
         document.getElementById("btnExportVex").disabled = false;
@@ -1735,8 +2083,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     });
     document.getElementById("filterStatus").addEventListener("change", (e) => setStatusFilter(e.target.value));
-    document.getElementById("filterOs").addEventListener("change", renderVerdictRows);
-    document.getElementById("filterSearch").addEventListener("input", renderVerdictRows);
+    document.getElementById("filterOs").addEventListener("change", () => { closeDrawer(); renderVerdictRows(); });
+    document.getElementById("filterSearch").addEventListener("input", () => { closeDrawer(); renderVerdictRows(); });
 
     document.getElementById("btnCopyBriefing").addEventListener("click", async (e) => {
       const text = document.getElementById("briefingBox").textContent || "";
@@ -1751,7 +2099,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     });
 
-    document.getElementById("verdictsBody").addEventListener("click", async (e) => {
+    /* Row click or Enter/Space opens Master-Detail Inspector Drawer */
+    document.getElementById("verdictsBody").addEventListener("click", (e) => {
+      const row = e.target.closest("tr[data-row-idx]");
+      if (!row) return;
+      openDrawer(Number(row.getAttribute("data-row-idx")));
+    });
+    document.getElementById("verdictsBody").addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const row = e.target.closest("tr[data-row-idx]");
+      if (!row) return;
+      e.preventDefault();
+      openDrawer(Number(row.getAttribute("data-row-idx")));
+    });
+
+    /* Copy & Run Mitigation actions inside the Inspector Drawer */
+    document.getElementById("drawerBody").addEventListener("click", async (e) => {
       const btn = e.target.closest("button");
       if (!btn) return;
       const copyCmd = btn.getAttribute("data-copy-cmd");
@@ -1839,6 +2202,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     # Per-process secret embedded in the served page and required on every POST, so a local
     # process or a non-browser client cannot drive /api/* without first loading the page.
     request_token: str = secrets.token_urlsafe(32)
+    remote_mode: bool = False
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         return
@@ -1887,7 +2251,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
-            self._send_html(HTTPStatus.OK, DASHBOARD_HTML.replace("__NOTAFFECTED_TOKEN__", self.request_token))
+            page_token = "" if self.remote_mode else self.request_token
+            self._send_html(HTTPStatus.OK, DASHBOARD_HTML.replace("__NOTAFFECTED_TOKEN__", page_token))
             return
         if parsed.path == "/api/targets":
             self._send_json(HTTPStatus.OK, get_targets_metadata())
@@ -1952,18 +2317,32 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
 
 
 def check_bind_address(host: str, allow_remote: bool = False) -> None:
-    """Refuse a non-loopback bind unless explicitly allowed (raises SystemExit with the reason)."""
-    if host.strip().lower() not in ("127.0.0.1", "::1", "localhost") and not allow_remote:
+    """Refuse a non-loopback bind unless explicitly allowed with NOTAFFECTED_REMOTE_TOKEN."""
+    is_loopback = host.strip().lower() in ("127.0.0.1", "::1", "localhost")
+    if is_loopback:
+        return
+    if not allow_remote:
         raise SystemExit(
             f"Refusing to bind the dashboard to {host!r}: it can run probes over SSH with your keys. "
-            "Pass --allow-remote to do it anyway."
+            "Pass --allow-remote and set NOTAFFECTED_REMOTE_TOKEN (>= 16 chars) to do it anyway."
+        )
+    remote_token = (os.environ.get("NOTAFFECTED_REMOTE_TOKEN") or "").strip()
+    if len(remote_token) < 16:
+        raise SystemExit(
+            f"Refusing to bind to {host!r} with --allow-remote without NOTAFFECTED_REMOTE_TOKEN (>= 16 chars)."
         )
 
 
 def run_web_server(host: str = "127.0.0.1", port: int = 8484, allow_remote: bool = False) -> None:
     """Start the local notaffected Web UI server (loopback only unless `allow_remote`)."""
     check_bind_address(host, allow_remote)
-    DashboardRequestHandler.request_token = secrets.token_urlsafe(32)
+    is_remote = host.strip().lower() not in ("127.0.0.1", "::1", "localhost")
+    DashboardRequestHandler.remote_mode = is_remote
+    DashboardRequestHandler.request_token = (
+        (os.environ.get("NOTAFFECTED_REMOTE_TOKEN") or "").strip()
+        if is_remote
+        else secrets.token_urlsafe(32)
+    )
     server = ThreadingHTTPServer((host, port), DashboardRequestHandler)
     try:
         server.serve_forever()

@@ -126,16 +126,20 @@ def fetch_cisa_kev_cves(
     return matched[: max(0, limit)]
 
 
-def _probe_installed_watched_packages(runner: HostRunner) -> dict[str, str]:
-    """Return `{package_name: installed_version}` for watched packages on a Linux host."""
-    installed: dict[str, str] = {}
+def _probe_installed_watched_packages(runner: HostRunner) -> list[tuple[str, str, str]]:
+    """Return `[(package_name, installed_version, ecosystem_hint)]` for watched packages on Linux."""
+    installed: list[tuple[str, str, str]] = []
     if getattr(runner, "os_family", "linux") != "linux":
         return installed
 
+    # Check dpkg first (Debian / Ubuntu)
+    dpkg_works = False
     for pkg in WATCHED_LINUX_PACKAGES:
         res = runner.run(
             ["dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Version}\\n", pkg]
         )
+        if not res.transport_error and (res.returncode == 0 or "no packages found" in res.stderr.lower()):
+            dpkg_works = True
         if res.transport_error or res.returncode != 0:
             continue
         first_line = (res.stdout.strip().splitlines() or [""])[0]
@@ -143,7 +147,31 @@ def _probe_installed_watched_packages(runner: HostRunner) -> dict[str, str]:
         status_col = parts[0].strip() if parts else ""
         ver = parts[1].strip() if len(parts) > 1 else first_line.strip()
         if _dpkg_status_installed(status_col) and ver:
-            installed[pkg] = ver
+            installed.append((pkg, ver, "deb"))
+
+    if dpkg_works or installed:
+        return installed
+
+    # Fallback to apk (Alpine)
+    for pkg in WATCHED_LINUX_PACKAGES:
+        res = runner.run(["apk", "info", "-e", "-v", pkg])
+        if res.transport_error or res.returncode != 0 or not res.stdout.strip():
+            continue
+        line = res.stdout.strip().splitlines()[0].strip()
+        prefix = f"{pkg}-"
+        if line.startswith(prefix) and len(line) > len(prefix):
+            installed.append((pkg, line[len(prefix) :], "apk"))
+    if installed:
+        return installed
+
+    # Fallback to rpm (RHEL / Rocky / Alma / Fedora)
+    for pkg in WATCHED_LINUX_PACKAGES:
+        res = runner.run(["rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\n", pkg])
+        if res.transport_error or res.returncode != 0 or not res.stdout.strip():
+            continue
+        ver = res.stdout.strip().splitlines()[0].strip()
+        if ver and "not installed" not in ver.lower():
+            installed.append((pkg, ver, "rpm"))
     return installed
 
 
@@ -160,28 +188,34 @@ def discover_host_package_cves(
     """Query OSV.dev `/v1/querybatch` for packages actually installed on the target Linux hosts.
     Returns a deduplicated list of `(cve_id, package_name)` pairs.
     """
-    pkg_versions: list[tuple[str, str]] = []
-    seen_pairs: set[tuple[str, str]] = set()
+    pkg_versions: list[tuple[str, str, str]] = []
+    seen_triples: set[tuple[str, str, str]] = set()
     for runner in runners:
         if getattr(runner, "os_family", "linux") != "linux":
             continue
-        for pkg, ver in _probe_installed_watched_packages(runner).items():
-            pair = (pkg, ver)
-            if pair not in seen_pairs:
-                seen_pairs.add(pair)
-                pkg_versions.append(pair)
+        for triple in _probe_installed_watched_packages(runner):
+            if triple not in seen_triples:
+                seen_triples.add(triple)
+                pkg_versions.append(triple)
 
     if not pkg_versions:
         return []
 
     queries: list[dict[str, Any]] = []
     query_pkg_map: list[str] = []
-    for pkg, ver in pkg_versions:
+    for pkg, ver, eco_kind in pkg_versions:
         osv_names = [pkg]
         if pkg in _BINARY_TO_OSV_SOURCE:
             osv_names.append(_BINARY_TO_OSV_SOURCE[pkg])
+        ecosystems = (
+            ("Alpine",)
+            if eco_kind == "apk"
+            else ("Red Hat", "Rocky Linux", "AlmaLinux")
+            if eco_kind == "rpm"
+            else ("Ubuntu", "Debian")
+        )
         for qname in osv_names:
-            for eco in ("Ubuntu", "Debian"):
+            for eco in ecosystems:
                 queries.append({"package": {"name": qname, "ecosystem": eco}, "version": ver})
                 query_pkg_map.append(pkg)
 
@@ -192,7 +226,7 @@ def discover_host_package_cves(
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "notaffected/0.5 (+https://openvex.dev)",
+                "User-Agent": f"notaffected/{__version__} (+https://openvex.dev)",
             },
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:

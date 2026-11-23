@@ -412,7 +412,7 @@ def test_osv_scoring_mitre_windows_and_fallback_verdict() -> None:
     assert any(p.probe == "windows_service_active" and p.params.get("service") == "TermServLicensing" for p in spec_win.preconditions)
 
     # 3. Unknown fallback CVE with 0 preconditions yields UNDER_INVESTIGATION on Windows too
-    spec_unknown = resolve_check_spec("CVE-9999-99999", use_llm=False)
+    spec_unknown = resolve_check_spec("CVE-9999-99999", use_llm=False, offline=True)
     win_host = MockRunner(host_name="win-dc-01", responses={}, os_family="windows")
     verdict_unk = evaluate_host(spec_unknown, win_host)
     assert verdict_unk.status == VerdictStatus.UNDER_INVESTIGATION
@@ -743,3 +743,38 @@ def test_unlabelled_container_is_not_a_lab_runner(monkeypatch) -> None:
     )
     assert web_mod._is_lab_runner(DockerRunner(container="prod-api")) is False
     assert web_mod._is_lab_runner(DockerRunner(container="-oops")) is False
+
+
+def test_security_review_hardening_regressions(monkeypatch) -> None:
+    import pytest
+
+    import notaffected.advisories.fetcher as fetcher_mod
+    import notaffected.web as web_mod
+
+    # 1) scanner_json rejects JSON-encoded strings (cannot hit Path(data).is_file())
+    res = evaluate_dashboard_request(
+        {
+            "target_mode": "demo_fleet",
+            "scan_mode": "scanner_json",
+            "scanner_report": '"/etc/passwd"',
+            "offline": True,
+        }
+    )
+    assert "Expected JSON object" in str(res.get("feed_meta", {}).get("error") or "")
+
+    # 2) SSRF helper fails closed on DNS OSError
+    def _dns_fail(*_a, **_k):
+        raise OSError("temporary failure in name resolution")
+
+    monkeypatch.setattr(fetcher_mod.socket, "getaddrinfo", _dns_fail)
+    assert fetcher_mod._is_safe_public_https_url("https://unresolvable.example.invalid/advisory") is False
+
+    # 3) --allow-remote requires NOTAFFECTED_REMOTE_TOKEN (>= 16 chars)
+    monkeypatch.delenv("NOTAFFECTED_REMOTE_TOKEN", raising=False)
+    with pytest.raises(SystemExit, match="NOTAFFECTED_REMOTE_TOKEN"):
+        web_mod.check_bind_address("0.0.0.0", allow_remote=True)
+    monkeypatch.setenv("NOTAFFECTED_REMOTE_TOKEN", "short")
+    with pytest.raises(SystemExit, match="NOTAFFECTED_REMOTE_TOKEN"):
+        web_mod.check_bind_address("0.0.0.0", allow_remote=True)
+    monkeypatch.setenv("NOTAFFECTED_REMOTE_TOKEN", "a-strong-remote-token-123456")
+    web_mod.check_bind_address("0.0.0.0", allow_remote=True)

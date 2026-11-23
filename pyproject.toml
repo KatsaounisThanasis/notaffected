@@ -14,10 +14,29 @@ keywords = [
     "security", "cve", "vex", "openvex", "vulnerability-management",
     "reachability", "linux", "sre", "devsecops", "trivy", "grype",
 ]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
 dependencies = [
     "rich>=13.0.0",
     "pyyaml>=6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/KatsaounisThanasis/notaffected"
+Repository = "https://github.com/KatsaounisThanasis/notaffected"
+Issues = "https://github.com/KatsaounisThanasis/notaffected/issues"
 
 [project.scripts]
 notaffected = "notaffected.cli:main"

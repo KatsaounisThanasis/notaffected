@@ -13,7 +13,7 @@ Every week dozens of new CVEs are published, and AI-assisted research is finding
 
 `notaffected` bridges the gap between security advisories and the real runtime state of your Linux and Windows Server hosts, containers, and Kubernetes pods:
 
-1. **Extracts attack preconditions** from advisories (built-in golden specs for Linux & Windows, OSV.dev / Ubuntu OSV records, kernel commit paths, and optional schema-validated LLM extraction with any provider and model you configure, local or hosted).
+1. **Extracts attack preconditions** from official advisories (built-in golden specs for Linux & Windows, OSV.dev / Ubuntu / Debian / Alpine OSV records, Red Hat Security Data API, Microsoft MSRC CVRF v3.0, MITRE CVE v5, CISA KEV, and optional schema-validated LLM extraction with any provider and model you configure, local or hosted).
 2. **Runs deterministic, read-only probes** on your targets (local host, Linux/Windows SSH fleet, Docker containers, or Kubernetes pods). **AI never decides the verdict and never runs shell commands**: the optional LLM may only propose parameters for the closed probe set, each one must be named in the advisory, it never sets the OS family or the VEX justification, and a `NOT_MET` from an LLM-proposed or keyword-heuristic check never yields `not_affected` on its own. `not_affected` needs a `NOT_MET` from a curated or structured-data check (or a probe-confirmed OS mismatch); every check that cannot compare, see or confirm something resolves to `under_investigation`.
 3. **Delivers actionable output:**
    - The short list of hosts that are **truly affected**, the exact temporary mitigation commands (`ufw`, `sysctl`, `modprobe -r`, `systemctl`, or PowerShell `Set-ItemProperty` / `Stop-Service`) to run right now, live APT patch status on Linux (`apt-cache policy`; Windows KB status comes from the built-in spec, not a live query), and an optional **AI Operational Risk & Remediation Briefing** (`--ai-explain`).
@@ -24,16 +24,7 @@ Every week dozens of new CVEs are published, and AI-assisted research is finding
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    A["Live Feeds (CISA KEV + OSV Batch)\nor CVE IDs / Trivy / Grype JSON"] --> B["Advisory Extractor\n(Built-in + OSV / MITRE + Optional Local LLM)"]
-    B --> C["CheckSpec\n(Closed 12-Probe DSL)"]
-    C --> D["Read-Only Probes\n(Linux / Windows SSH / Docker / K8s)"]
-    D --> E["Three-Valued Engine\n(MET / NOT_MET / UNKNOWN)"]
-    E --> F["Web UI (127.0.0.1:8484) &\nRich Terminal + --ai-explain"]
-    E --> G["OpenVEX v0.2.0 (.vex.json)"]
-    E --> H["Standalone HTML Report (.html)"]
-```
+![notaffected Architecture](docs/architecture.png)
 
 ### Closed Set of 12 Read-Only Probes (Linux & Windows Server)
 
@@ -75,7 +66,7 @@ From the Web Dashboard you can:
 - Auto-discover running Docker containers, load `inventory.yaml`, select a single custom Docker/SSH target, or inspect the simulated Linux + Windows Server fleet.
 - Run **Auto-Scan** (combines built-in rules + live OSV `/v1/querybatch` queries for a fixed watch list of 7 packages, keeping up to 6 OSV CVEs, + up to 4 CISA KEV actively exploited CVEs), check specific CVE IDs, or upload a **Trivy / Grype JSON report**.
 - Try allowlisted temporary mitigations on the lab via **Run Mitigation**, reset the lab via **Reset Lab / Demo**, and download **OpenVEX v0.2.0 (`.vex.json`)**, **Audit JSON**, or a **Standalone HTML Report**. Run Mitigation works only on the simulated fleet (where the row flip is simulated) and on Docker containers labelled `notaffected.lab=true`; it refuses local and SSH hosts and any container without that label (also when it comes from an inventory file), because the tool's design is to never change real target hosts. Apply mitigations on real hosts yourself.
-- Every dashboard POST needs the per-process token embedded in the page, and `notaffected ui` refuses a non-loopback `--bind` unless you add `--allow-remote` (the dashboard can run probes over SSH with your keys).
+- Every dashboard POST needs the per-process token embedded in the page, and `notaffected ui` refuses a non-loopback `--bind` unless you pass `--allow-remote` **and** set `NOTAFFECTED_REMOTE_TOKEN` (at least 16 chars, never embedded in unauthenticated HTML).
 
 ### 2. Zero-Argument Auto-Scan & Fleet Initialization
 ```bash
@@ -88,17 +79,17 @@ notaffected scan -i inventory.yaml --emit-vex vex.json --html report.html
 
 ### 3. Inspect extracted preconditions & mitigations for any CVE
 ```bash
-notaffected spec CVE-2026-98432
+notaffected spec CVE-2024-6387
 notaffected spec CVE-2024-30080 --llm
 ```
 
 ### 4. Check specific CVEs across local, SSH, Docker, or Kubernetes targets
 ```bash
 # Live check on your local Linux machine
-notaffected check CVE-2026-98432 CVE-2024-47176 CVE-2022-47942 --host local
+notaffected check CVE-2024-6387 CVE-2024-47176 CVE-2023-32233 --host local
 
 # Run against the built-in 5-host mixed Linux + Windows Server demo fleet
-notaffected check CVE-2026-98432 CVE-2024-38063 CVE-2021-34527 --demo-fleet --ai-explain --emit-vex vex.json --html report.html
+notaffected check CVE-2024-6387 CVE-2024-38063 CVE-2021-34527 --demo-fleet --ai-explain --emit-vex vex.json --html report.html
 
 # Linux and Windows OpenSSH targets or running Docker / Kubernetes workloads
 notaffected check CVE-2024-6387 CVE-2024-38063 --ssh ubuntu@10.0.0.10 --win-ssh Administrator@10.0.1.50

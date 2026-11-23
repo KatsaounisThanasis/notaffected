@@ -4,6 +4,7 @@ optional schema-validated LLM extraction.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 from pathlib import Path
@@ -11,8 +12,11 @@ from typing import Any
 
 from notaffected.advisories.builtin_specs import BUILTIN_SPECS
 from notaffected.advisories.fetcher import (
+    fetch_debian_osv_advisory,
     fetch_mitre_cve_as_osv,
+    fetch_msrc_advisory_as_osv,
     fetch_osv_advisory,
+    fetch_redhat_advisory_as_osv,
     fetch_reference_snippets,
     fetch_ubuntu_osv_advisory,
 )
@@ -161,19 +165,28 @@ def resolve_check_spec(
     if norm_id in BUILTIN_SPECS:
         return BUILTIN_SPECS[norm_id]
 
-    osv_data = None if offline else fetch_osv_advisory(norm_id, cache_dir=cache_dir)
-    ubuntu_osv = None if offline else fetch_ubuntu_osv_advisory(norm_id, cache_dir=cache_dir)
-    if osv_data and ubuntu_osv:
-        merged = dict(osv_data)
-        merged["affected"] = list(osv_data.get("affected") or []) + list(
-            ubuntu_osv.get("affected") or []
-        )
-        for field_key in ("summary", "details", "references", "database_specific"):
-            if not merged.get(field_key) and ubuntu_osv.get(field_key):
-                merged[field_key] = ubuntu_osv[field_key]
-        osv_data = merged
-    elif ubuntu_osv and not osv_data:
-        osv_data = ubuntu_osv
+    osv_data: dict[str, Any] | None = None
+    extras: list[dict[str, Any] | None] = []
+    if not offline:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            f_osv = pool.submit(fetch_osv_advisory, norm_id, cache_dir)
+            f_ubu = pool.submit(fetch_ubuntu_osv_advisory, norm_id, cache_dir)
+            f_deb = pool.submit(fetch_debian_osv_advisory, norm_id, cache_dir)
+            f_rh = pool.submit(fetch_redhat_advisory_as_osv, norm_id, cache_dir)
+            osv_data = f_osv.result()
+            extras = [f_ubu.result(), f_deb.result(), f_rh.result()]
+    for extra in extras:
+        if extra and osv_data:
+            merged = dict(osv_data)
+            merged["affected"] = list(osv_data.get("affected") or []) + list(
+                extra.get("affected") or []
+            )
+            for field_key in ("summary", "details", "references", "database_specific"):
+                if not merged.get(field_key) and extra.get(field_key):
+                    merged[field_key] = extra[field_key]
+            osv_data = merged
+        elif extra and not osv_data:
+            osv_data = extra
 
     if not osv_data and not offline:
         osv_data = fetch_mitre_cve_as_osv(norm_id, cache_dir=cache_dir)
@@ -190,6 +203,38 @@ def resolve_check_spec(
                     osv_data["database_specific"] = db_s
                 if not osv_data.get("summary") and mitre_extra.get("summary"):
                     osv_data["summary"] = mitre_extra["summary"]
+
+    if not offline:
+        text_probe = (
+            f"{osv_data.get('summary') or ''} {osv_data.get('details') or ''}".lower()
+            if isinstance(osv_data, dict)
+            else ""
+        )
+        has_msrc_link = isinstance(osv_data, dict) and any(
+            "msrc.microsoft.com" in str(r.get("url") or "").lower()
+            for r in (osv_data.get("references") or [])
+            if isinstance(r, dict)
+        )
+        if not osv_data or has_msrc_link or "windows" in text_probe or "microsoft" in text_probe:
+            msrc_extra = fetch_msrc_advisory_as_osv(norm_id, cache_dir=cache_dir)
+            if isinstance(msrc_extra, dict):
+                if not osv_data:
+                    osv_data = msrc_extra
+                else:
+                    osv_data = dict(osv_data)
+                    db_s = dict(osv_data.get("database_specific") or {})
+                    m_db = msrc_extra.get("database_specific") or {}
+                    if m_db.get("msrc_fixed_builds"):
+                        db_s["msrc_fixed_builds"] = m_db["msrc_fixed_builds"]
+                    if m_db.get("msrc_kbs"):
+                        db_s["msrc_kbs"] = m_db["msrc_kbs"]
+                    osv_data["database_specific"] = db_s
+                    if not osv_data.get("summary") and msrc_extra.get("summary"):
+                        osv_data["summary"] = msrc_extra["summary"]
+                    refs = list(osv_data.get("references") or [])
+                    if not has_msrc_link:
+                        refs.extend(msrc_extra.get("references") or [])
+                        osv_data["references"] = refs
 
     if osv_data:
         return extract_from_osv_payload(
@@ -285,6 +330,17 @@ def extract_from_osv_payload(
         if isinstance(db_spec, dict) and isinstance(db_spec.get("mitre_affected"), list)
         else []
     )
+    msrc_fixed_builds = [
+        str(b).strip()
+        for b in (db_spec.get("msrc_fixed_builds") or [])
+        if isinstance(db_spec, dict) and str(b).strip()
+    ]
+    msrc_kbs = [
+        str(k).strip().upper()
+        for k in (db_spec.get("msrc_kbs") or [])
+        if isinstance(db_spec, dict) and str(k).strip()
+    ]
+    has_msrc_structured = bool(msrc_fixed_builds or msrc_kbs)
     has_msrc_ref = any(
         "msrc.microsoft.com" in str(r.get("url") or "").lower()
         for r in (osv_data.get("references") or [])
@@ -320,16 +376,21 @@ def extract_from_osv_payload(
         )
     )
     is_windows = (
-        (has_mitre_windows and (not pkg_name or text_lower.startswith("windows ")))
+        has_msrc_structured
+        or (has_mitre_windows and (not pkg_name or text_lower.startswith("windows ")))
         or (not pkg_name and has_windows_phrase)
         or (not pkg_name and has_msrc_ref and "windows" in text_lower)
     )
     os_family = "windows" if is_windows else "linux"
-    has_kb_ref = bool(re.search(r"\bKB\d{6,8}\b", full_text, re.IGNORECASE))
+    has_kb_ref = bool(msrc_kbs) or bool(re.search(r"\bKB\d{6,8}\b", full_text, re.IGNORECASE))
     kernel_by_pkg = pkg_name in ("linux", "linux-image", "kernel")
     if is_windows:
-        # Structured only with MSRC + KB evidence or an all-Windows MITRE product list.
-        os_source = "structured" if (has_mitre_windows or (has_msrc_ref and has_kb_ref)) else "heuristic"
+        # Structured only with MSRC structured data, MSRC + KB evidence, or an all-Windows MITRE product list.
+        os_source = (
+            "structured"
+            if (has_msrc_structured or has_mitre_windows or (has_msrc_ref and has_kb_ref))
+            else "heuristic"
+        )
     else:
         os_source = "structured" if (distro_eco or kernel_by_pkg) else "heuristic"
     # Provenance of the version/package precondition built below.
@@ -342,9 +403,13 @@ def extract_from_osv_payload(
 
     if is_windows:
         kb_match = re.search(r"\b(KB\d{6,8})\b", full_text, re.IGNORECASE)
-        kb_id = kb_match.group(1).upper() if kb_match else ""
+        kb_id = msrc_kbs[0] if msrc_kbs else (kb_match.group(1).upper() if kb_match else "")
         fixed_build = ""
-        branch_builds: list[str] = []
+        branch_builds: list[str] = list(msrc_fixed_builds)
+        for cand_build in msrc_fixed_builds:
+            if cand_build.startswith("20348."):
+                fixed_build = cand_build
+                break
         for a in mitre_aff:
             if not isinstance(a, dict):
                 continue
@@ -746,12 +811,15 @@ def _extract_release_fixes(osv_data: dict[str, Any], pkg_name: str) -> dict[str,
         m_ubu = re.search(r"ubuntu:(\d{2}\.\d{2})", eco_low)
         m_deb = re.search(r"debian:(\d+)", eco_low)
         m_alp = re.search(r"alpine:v?(\d+\.\d+)", eco_low)
+        m_rhel = re.search(r"(?:red\s*hat|rhel):(\d+)", eco_low)
         if m_ubu:
             rel_key = f"ubuntu:{m_ubu.group(1)}"
         elif m_deb:
             rel_key = f"debian:{m_deb.group(1)}"
         elif m_alp:
             rel_key = f"alpine:{m_alp.group(1)}"
+        elif m_rhel:
+            rel_key = f"rhel:{m_rhel.group(1)}"
         if not rel_key:
             continue
         # Every listed release is recorded; "" = listed as affected with no fix yet.

@@ -160,6 +160,18 @@ def test_kernel_path_mapping_and_ubuntu_osv_merge(monkeypatch):
         "notaffected.advisories.extractor.fetch_ubuntu_osv_advisory",
         lambda cve_id, cache_dir=None: ubuntu_osv,
     )
+    monkeypatch.setattr(
+        "notaffected.advisories.extractor.fetch_debian_osv_advisory",
+        lambda cve_id, cache_dir=None: None,
+    )
+    monkeypatch.setattr(
+        "notaffected.advisories.extractor.fetch_redhat_advisory_as_osv",
+        lambda cve_id, cache_dir=None: None,
+    )
+    monkeypatch.setattr(
+        "notaffected.advisories.extractor.fetch_msrc_advisory_as_osv",
+        lambda cve_id, cache_dir=None: None,
+    )
 
     spec = resolve_check_spec("CVE-2025-99999", use_llm=False)
     assert spec.patch.fixed_version == "6.8.0-52.53"
@@ -831,3 +843,123 @@ def test_status_says_configured_exactly_when_generate_would_send(monkeypatch, en
 
     assert local_model.get_ai_status()["configured"] is sent
     assert local_model.llm_configured() is sent
+
+
+def test_debian_osv_redhat_and_msrc_fetchers_normalize_and_respect_offline(tmp_path, monkeypatch):
+    import io
+    import json
+
+    from notaffected.advisories import fetcher
+    from notaffected.advisories.extractor import _extract_release_fixes, extract_from_osv_payload
+
+    # 1) Offline mode makes zero network calls
+    def _no_net(*_a, **_k):
+        raise AssertionError("network must not be called when offline=True")
+
+    monkeypatch.setattr(fetcher.urllib.request, "urlopen", _no_net)
+    assert fetcher.fetch_debian_osv_advisory("CVE-2024-6387", cache_dir=tmp_path, offline=True) is None
+    assert fetcher.fetch_redhat_advisory_as_osv("CVE-2024-6387", cache_dir=tmp_path, offline=True) is None
+    assert fetcher.fetch_msrc_advisory_as_osv("CVE-2024-38063", cache_dir=tmp_path, offline=True) is None
+
+    # 2) Red Hat Security Data API -> normalized OSV + rhel:9 release_fixes + cached
+    rh_payload = {
+        "threat_severity": "Important",
+        "details": ["OpenSSH regreSSHion flaw."],
+        "affected_release": [
+            {
+                "product_name": "Red Hat Enterprise Linux 9",
+                "cpe": "cpe:/o:redhat:enterprise_linux:9",
+                "package": "openssh-0:8.7p1-38.el9_4.1",
+                "advisory": "RHSA-2024:4312",
+            }
+        ],
+        "package_state": [{"product_name": "RHEL 8", "fix_state": "Not affected", "package_name": "openssh"}],
+    }
+
+    class _FakeResp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    monkeypatch.setattr(
+        fetcher.urllib.request,
+        "urlopen",
+        lambda req, timeout=6: _FakeResp(json.dumps(rh_payload).encode("utf-8")),
+    )
+    rh_osv = fetcher.fetch_redhat_advisory_as_osv("CVE-2024-6387", cache_dir=tmp_path)
+    assert rh_osv is not None
+    assert _extract_release_fixes(rh_osv, "openssh") == {"rhel:9": "0:8.7p1-38.el9_4.1"}
+    assert (tmp_path / "REDHAT-CVE-2024-6387.json").is_file()
+
+    # 3) Microsoft MSRC CVRF v3.0 -> structured Windows build + KB + host allowlist guard
+    msrc_updates = {"value": [{"ID": "2024-Aug", "CvrfUrl": "https://api.msrc.microsoft.com/cvrf/v3.0/cvrf/2024-Aug"}]}
+    msrc_cvrf = {
+        "Vulnerability": [
+            {
+                "CVE": "CVE-2024-99100",
+                "Title": {"Value": "Windows TCP/IP Elevation of Privilege"},
+                "Notes": [{"Value": "TCP/IP stack issue"}],
+                "Threats": [{"Type": 3, "Description": {"Value": "Critical"}}],
+                "Remediations": [
+                    {
+                        "Type": 2,
+                        "SubType": "Security Update",
+                        "Description": {"Value": "5041585"},
+                        "FixedBuild": "10.0.20348.2655",
+                    }
+                ],
+            }
+        ]
+    }
+
+    def _fake_msrc(req, timeout=10):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        body = msrc_updates if "/updates/" in url else msrc_cvrf
+        return _FakeResp(json.dumps(body).encode("utf-8"))
+
+    monkeypatch.setattr(fetcher.urllib.request, "urlopen", _fake_msrc)
+    msrc_osv = fetcher.fetch_msrc_advisory_as_osv("CVE-2024-99100", cache_dir=tmp_path)
+    assert msrc_osv is not None
+    spec = extract_from_osv_payload("CVE-2024-99100", msrc_osv)
+    assert spec.os_family == "windows"
+    assert spec.os_source == "structured"
+    win_pre = [p for p in spec.preconditions if p.probe == "windows_build_vulnerable"]
+    assert len(win_pre) == 1
+    assert win_pre[0].params.get("fixed_build") == "20348.2655"
+    assert win_pre[0].origin == "osv"
+
+    # Reject non-MSRC CvrfUrl host (SSRF guard)
+    bad_updates = {"value": [{"ID": "2024-Aug", "CvrfUrl": "https://127.0.0.1/cvrf"}]}
+    monkeypatch.setattr(
+        fetcher.urllib.request,
+        "urlopen",
+        lambda req, timeout=10: _FakeResp(json.dumps(bad_updates).encode("utf-8")),
+    )
+    assert fetcher.fetch_msrc_advisory_as_osv("CVE-2024-99101", cache_dir=tmp_path) is None
+
+
+def test_live_feed_discovers_alpine_and_rpm_watched_packages():
+    from notaffected.advisories.live_feed import _probe_installed_watched_packages
+    from notaffected.probes.runner import CommandResult, MockRunner
+
+    alpine = MockRunner(
+        "alp-01",
+        {
+            ("apk", "info", "-e", "-v", "openssl"): CommandResult(0, "openssl-3.3.1-r3\n", ""),
+        },
+        simulate_dpkg_db=False,
+    )
+    assert _probe_installed_watched_packages(alpine) == [("openssl", "3.3.1-r3", "apk")]
+
+    rhel = MockRunner(
+        "rhel-01",
+        {
+            ("rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\n", "openssh-server"): CommandResult(
+                0, "8.7p1-38.el9_4.1\n", ""
+            ),
+        },
+        simulate_dpkg_db=False,
+    )
+    assert _probe_installed_watched_packages(rhel) == [("openssh-server", "8.7p1-38.el9_4.1", "rpm")]
