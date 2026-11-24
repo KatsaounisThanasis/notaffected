@@ -14,7 +14,7 @@ from typing import Any
 from notaffected import __version__
 from notaffected.advisories.builtin_specs import BUILTIN_SPECS
 from notaffected.advisories.extractor import extract_from_osv_payload, resolve_check_spec
-from notaffected.advisories.fetcher import DEFAULT_CACHE_DIR
+from notaffected.advisories.fetcher import DEFAULT_CACHE_DIR, _write_json_atomic
 from notaffected.model import CheckSpec
 from notaffected.probes.primitives import _dpkg_status_installed
 from notaffected.probes.runner import HostRunner
@@ -91,11 +91,7 @@ def fetch_cisa_kev_cves(
                 raw = json.loads(raw_bytes.decode("utf-8"))
             if isinstance(raw, dict) and isinstance(raw.get("vulnerabilities"), list):
                 payload = raw
-                try:
-                    cdir.mkdir(parents=True, exist_ok=True)
-                    cache_file.write_text(json.dumps(payload), encoding="utf-8")
-                except OSError:
-                    pass
+                _write_json_atomic(cache_file, payload)
         except Exception:
             return []
 

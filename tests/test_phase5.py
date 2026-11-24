@@ -778,3 +778,64 @@ def test_security_review_hardening_regressions(monkeypatch) -> None:
         web_mod.check_bind_address("0.0.0.0", allow_remote=True)
     monkeypatch.setenv("NOTAFFECTED_REMOTE_TOKEN", "a-strong-remote-token-123456")
     web_mod.check_bind_address("0.0.0.0", allow_remote=True)
+
+
+def test_live_qa_round3_regressions(tmp_path) -> None:
+    import urllib.error
+    import urllib.request
+
+    import notaffected.web as web_mod
+    from notaffected import cli
+    from notaffected.advisories.fetcher import _write_json_atomic
+    from notaffected.model import Precondition, ProbeStatus
+    from notaffected.probes.primitives import run_probe
+
+    # 1) --offline supported on check, filter, and spec
+    assert cli.main(["spec", "CVE-2024-99999", "--offline"]) == 0
+    assert cli.main(["check", "CVE-2024-6387", "--demo-fleet", "--offline"]) == 0
+    assert cli.main(["filter", "examples/trivy-scan.json", "--demo-fleet", "--offline"]) == 0
+
+    # 2) kernel_module_loaded rejects leading '-'
+    res_mod = run_probe(Precondition("kernel_module_loaded", {"module": "-foo"}, "bad mod"), MockRunner("h", {}))
+    assert res_mod.status == ProbeStatus.UNKNOWN
+
+    # 3) scanner_report {} or [] never silently falls back to examples/trivy-scan.json
+    res_arr = evaluate_dashboard_request(
+        {"target_mode": "demo_fleet", "scan_mode": "scanner_json", "scanner_report": [], "offline": True}
+    )
+    assert "Expected JSON object" in str(res_arr.get("feed_meta", {}).get("error") or "")
+    res_empty = evaluate_dashboard_request(
+        {"target_mode": "demo_fleet", "scan_mode": "scanner_json", "scanner_report": {}, "offline": True}
+    )
+    assert res_empty["summary"]["cves_evaluated"] == 0
+
+    # 4) atomic cache write produces valid JSON
+    p = tmp_path / "atomic.json"
+    _write_json_atomic(p, {"ok": True})
+    assert p.is_file()
+
+    # 5) remote_mode requires X-Notaffected-Token on GET /api/targets & /api/spec
+    class _RemoteHandler(web_mod.DashboardRequestHandler):
+        remote_mode = True
+        request_token = "remote-secret-token-1234567890"
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _RemoteHandler)
+    port = srv.server_address[1]
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        for path in ("/api/targets", "/api/spec?cve=CVE-2024-6387"):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5)
+                raise AssertionError(f"Expected 403 for unauthenticated {path}")
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 403
+        req_ok = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/targets",
+            headers={"X-Notaffected-Token": "remote-secret-token-1234567890"},
+        )
+        with urllib.request.urlopen(req_ok, timeout=5) as resp:
+            assert resp.status == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()

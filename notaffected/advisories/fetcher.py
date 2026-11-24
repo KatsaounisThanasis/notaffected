@@ -5,8 +5,11 @@ from __future__ import annotations
 import concurrent.futures
 import ipaddress
 import json
+import os
 import re
 import socket
+import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,10 +20,31 @@ from notaffected import __version__
 
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "notaffected" / "osv"
 _SAFE_ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{2,63}$")
-_OSV_MISS_CACHE: set[str] = set()
-_REDHAT_MISS_CACHE: set[str] = set()
-_MSRC_MISS_CACHE: set[str] = set()
+_MISS_LOCK = threading.Lock()
+_OSV_MISS_CACHE: set[tuple[str, str]] = set()
+_REDHAT_MISS_CACHE: set[tuple[str, str]] = set()
+_MSRC_MISS_CACHE: set[tuple[str, str]] = set()
 _MAX_MSRC_BYTES = 20 * 1024 * 1024
+
+
+def _write_json_atomic(path: Path, data: Any) -> None:
+    """Write JSON to a temp file in the same directory and atomically replace `path`."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(data, indent=2)
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+            os.replace(tmp_name, path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass
 
 
 def fetch_osv_advisory(
@@ -42,7 +66,10 @@ def fetch_osv_advisory(
         except Exception:
             pass
 
-    if offline or (cache_dir is None and norm_id in _OSV_MISS_CACHE):
+    miss_key = (str(cdir.resolve()), norm_id)
+    with _MISS_LOCK:
+        is_miss = miss_key in _OSV_MISS_CACHE
+    if offline or is_miss:
         return None
 
     url = f"https://api.osv.dev/v1/vulns/{norm_id}"
@@ -51,15 +78,12 @@ def fetch_osv_advisory(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.load(resp)
         if isinstance(data, dict):
-            try:
-                cdir.mkdir(parents=True, exist_ok=True)
-                cache_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            except OSError:
-                pass
+            _write_json_atomic(cache_file, data)
             return data
     except urllib.error.HTTPError as exc:
-        if exc.code == 404 and cache_dir is None:
-            _OSV_MISS_CACHE.add(norm_id)
+        if exc.code == 404:
+            with _MISS_LOCK:
+                _OSV_MISS_CACHE.add(miss_key)
         return None
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return None
@@ -125,7 +149,10 @@ def fetch_redhat_advisory_as_osv(
         except Exception:
             pass
 
-    if offline or (cache_dir is None and norm_id in _REDHAT_MISS_CACHE):
+    miss_key = (str(cdir.resolve()), norm_id)
+    with _MISS_LOCK:
+        is_miss = miss_key in _REDHAT_MISS_CACHE
+    if offline or is_miss:
         return None
 
     url = f"https://access.redhat.com/hydra/rest/securitydata/cve/{norm_id}.json"
@@ -195,15 +222,12 @@ def fetch_redhat_advisory_as_osv(
                 "package_state": raw.get("package_state") or [],
             },
         }
-        try:
-            cdir.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        _write_json_atomic(cache_file, normalized)
         return normalized
     except urllib.error.HTTPError as exc:
-        if exc.code == 404 and cache_dir is None:
-            _REDHAT_MISS_CACHE.add(norm_id)
+        if exc.code == 404:
+            with _MISS_LOCK:
+                _REDHAT_MISS_CACHE.add(miss_key)
         return None
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return None
@@ -230,7 +254,10 @@ def fetch_msrc_advisory_as_osv(
         except Exception:
             pass
 
-    if offline or (cache_dir is None and norm_id in _MSRC_MISS_CACHE):
+    miss_key = (str(cdir.resolve()), norm_id)
+    with _MISS_LOCK:
+        is_miss = miss_key in _MSRC_MISS_CACHE
+    if offline or is_miss:
         return None
 
     headers = {
@@ -244,8 +271,8 @@ def fetch_msrc_advisory_as_osv(
             updates_raw = json.load(resp)
         entries = updates_raw.get("value") if isinstance(updates_raw, dict) else None
         if not isinstance(entries, list) or not entries:
-            if cache_dir is None:
-                _MSRC_MISS_CACHE.add(norm_id)
+            with _MISS_LOCK:
+                _MSRC_MISS_CACHE.add(miss_key)
             return None
         cvrf_url = str(entries[0].get("CvrfUrl") or "").strip()
         parsed_cvrf = urllib.parse.urlparse(cvrf_url)
@@ -264,8 +291,8 @@ def fetch_msrc_advisory_as_osv(
                 vuln_entry = v
                 break
         if vuln_entry is None:
-            if cache_dir is None:
-                _MSRC_MISS_CACHE.add(norm_id)
+            with _MISS_LOCK:
+                _MSRC_MISS_CACHE.add(miss_key)
             return None
 
         title = str((vuln_entry.get("Title") or {}).get("Value") or "").strip()
@@ -318,15 +345,12 @@ def fetch_msrc_advisory_as_osv(
                 "msrc_kbs": kbs,
             },
         }
-        try:
-            cdir.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        _write_json_atomic(cache_file, normalized)
         return normalized
     except urllib.error.HTTPError as exc:
-        if exc.code == 404 and cache_dir is None:
-            _MSRC_MISS_CACHE.add(norm_id)
+        if exc.code == 404:
+            with _MISS_LOCK:
+                _MSRC_MISS_CACHE.add(miss_key)
         return None
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return None
@@ -402,11 +426,7 @@ def fetch_mitre_cve_as_osv(
                 "mitre_affected": mitre_affected,
             },
         }
-        try:
-            cdir.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+        _write_json_atomic(cache_file, normalized)
         return normalized
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return None
@@ -475,6 +495,8 @@ def _is_safe_public_https_url(url: str) -> bool:
         pass
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        if not infos:
+            return False
         for info in infos:
             addr = info[4][0]
             ip_obj = ipaddress.ip_address(addr)

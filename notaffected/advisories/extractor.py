@@ -560,7 +560,15 @@ def extract_from_osv_payload(
             )
             mitigation.append(f"sudo ufw deny {port_num}/{proto}")
 
-    source = "osv"
+    db_source = str(db_spec.get("source") or "").strip().lower() if isinstance(db_spec, dict) else ""
+    if db_source in ("msrc", "redhat", "mitre"):
+        source = db_source
+    elif has_msrc_structured:
+        source = "msrc"
+    elif has_mitre_windows and not osv_data.get("affected"):
+        source = "mitre"
+    else:
+        source = "osv"
     if use_llm:
         enriched_text = full_text
         # extra reference text only feeds the model: no model configured, nothing fetched
@@ -584,7 +592,7 @@ def extract_from_osv_payload(
             if m not in mitigation:
                 mitigation.append(m)
         if llm_pres:
-            source = "osv+llm"
+            source = f"{source}+llm"
 
     # High confidence requires at least one narrowing runtime precondition beyond bare version check,
     # and on Windows also requires a build/KB baseline precondition so a service check alone never

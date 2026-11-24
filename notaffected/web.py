@@ -363,10 +363,13 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
     elif scan_mode == "scanner_json":
         raw_report = payload.get("scanner_report")
         sample_path = Path("examples/trivy-scan.json")
-        explicit_report = isinstance(raw_report, (dict, str)) and bool(raw_report)
+        explicit_report = raw_report is not None and raw_report != ""
         try:
             if explicit_report:
-                parsed_report = json.loads(raw_report) if isinstance(raw_report, str) else raw_report
+                if isinstance(raw_report, str):
+                    parsed_report = json.loads(raw_report)
+                else:
+                    parsed_report = raw_report
                 if not isinstance(parsed_report, dict):
                     raise ValueError("Expected JSON object for scanner_report")
                 findings = parse_scanner_json(parsed_report)
@@ -832,6 +835,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: var(--accent);
     }
     .switch-label input[type="checkbox"]:disabled { opacity: 0.4; cursor: not-allowed; }
+    .switch-label:has(input[type="checkbox"]:disabled) { opacity: 0.52; cursor: not-allowed; }
 
     .feed-banner {
       font-size: 0.74rem;
@@ -1518,11 +1522,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
         <div class="filter-bar" id="verdictsFilterBar">
           <div class="seg-group" id="statusSegments" role="group" aria-label="Filter by verdict status">
-            <button type="button" class="seg-btn active" data-status="attention" title="Affected and under investigation">Needs Attention</button>
-            <button type="button" class="seg-btn" data-status="all">All</button>
-            <button type="button" class="seg-btn" data-status="affected">Affected</button>
-            <button type="button" class="seg-btn" data-status="not_affected">Not Affected</button>
-            <button type="button" class="seg-btn" data-status="under_investigation">Investigating</button>
+            <button type="button" class="seg-btn active" data-status="attention" aria-pressed="true" title="Affected and under investigation">Needs Attention</button>
+            <button type="button" class="seg-btn" data-status="all" aria-pressed="false">All</button>
+            <button type="button" class="seg-btn" data-status="affected" aria-pressed="false">Affected</button>
+            <button type="button" class="seg-btn" data-status="not_affected" aria-pressed="false">Not Affected</button>
+            <button type="button" class="seg-btn" data-status="under_investigation" aria-pressed="false">Investigating</button>
           </div>
           <select id="filterStatus" class="sr-select" aria-label="Verdict status filter">
             <option value="attention" selected>Needs Attention</option>
@@ -1576,7 +1580,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <!-- Master-Detail Inspector Drawer -->
   <div class="drawer-backdrop" id="drawerBackdrop"></div>
-  <aside class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-label="Verdict Inspector">
+  <aside class="detail-drawer" id="detailDrawer" role="dialog" aria-modal="true" aria-hidden="true" inert aria-label="Verdict Inspector">
     <div class="drawer-header">
       <div>
         <div class="drawer-title-row" id="drawerTitleRow"></div>
@@ -1673,7 +1677,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const sel = document.getElementById("filterStatus");
       sel.value = val;
       document.querySelectorAll("#statusSegments .seg-btn").forEach((b) => {
-        b.classList.toggle("active", b.getAttribute("data-status") === val);
+        const isActive = b.getAttribute("data-status") === val;
+        b.classList.toggle("active", isActive);
+        b.setAttribute("aria-pressed", isActive ? "true" : "false");
       });
       closeDrawer();
       renderVerdictRows();
@@ -1708,7 +1714,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let lastFocusedBeforeDrawer = null;
     function closeDrawer() {
       selectedIdx = -1;
-      document.getElementById("detailDrawer").classList.remove("open");
+      const drawer = document.getElementById("detailDrawer");
+      drawer.classList.remove("open");
+      drawer.setAttribute("aria-hidden", "true");
+      drawer.inert = true;
+      document.getElementById("drawerBody").innerHTML = "";
       document.getElementById("drawerBackdrop").classList.remove("open");
       document.querySelectorAll("#verdictsBody tr.row-selected").forEach((r) => r.classList.remove("row-selected"));
       if (lastFocusedBeforeDrawer && typeof lastFocusedBeforeDrawer.focus === "function") {
@@ -1828,8 +1838,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       `;
 
-      document.getElementById("detailDrawer").classList.add("open");
+      const drawer = document.getElementById("detailDrawer");
+      drawer.removeAttribute("aria-hidden");
+      drawer.inert = false;
+      drawer.classList.add("open");
       document.getElementById("drawerBackdrop").classList.add("open");
+      const closeBtn = document.getElementById("btnCloseDrawer");
+      if (closeBtn) closeBtn.focus({ preventScroll: true });
     }
 
     document.getElementById("btnCloseDrawer").addEventListener("click", closeDrawer);
@@ -2087,10 +2102,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     document.getElementById("filterSearch").addEventListener("input", () => { closeDrawer(); renderVerdictRows(); });
 
     document.getElementById("btnCopyBriefing").addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
       const text = document.getElementById("briefingBox").textContent || "";
       try {
         await navigator.clipboard.writeText(text);
-        const btn = e.currentTarget;
         const orig = btn.textContent;
         btn.textContent = "Copied!";
         setTimeout(() => { btn.textContent = orig; }, 1200);
@@ -2230,6 +2245,8 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return False
         host_only = raw_host.split(":")[0] if not raw_host.startswith("[") else raw_host.split("]")[0] + "]"
         srv_addr = str(self.server.server_address[0]).lower()
+        if self.remote_mode and srv_addr in ("0.0.0.0", "::", ""):
+            return bool(host_only)
         return host_only in _ALLOWED_LOCAL_HOSTS or host_only == srv_addr
 
     def _is_allowed_post_origin(self) -> bool:
@@ -2241,9 +2258,17 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             parsed_origin = urllib.parse.urlparse(origin)
             origin_host = (parsed_origin.hostname or "").lower()
             srv_addr = str(self.server.server_address[0]).lower()
+            if self.remote_mode and srv_addr in ("0.0.0.0", "::", ""):
+                raw_host = (self.headers.get("Host") or "").strip().lower()
+                host_only = raw_host.split(":")[0] if not raw_host.startswith("[") else raw_host.split("]")[0].lstrip("[")
+                return bool(origin_host) and (origin_host == host_only or origin_host in _ALLOWED_LOCAL_HOSTS)
             if origin_host not in _ALLOWED_LOCAL_HOSTS and origin_host != srv_addr:
                 return False
         return True
+
+    def _has_valid_token(self) -> bool:
+        sent_token = self.headers.get("X-Notaffected-Token") or ""
+        return hmac.compare_digest(sent_token.encode("utf-8"), self.request_token.encode("utf-8"))
 
     def do_GET(self) -> None:  # noqa: N802
         if not self._is_allowed_host():
@@ -2253,6 +2278,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         if parsed.path in ("/", "/index.html"):
             page_token = "" if self.remote_mode else self.request_token
             self._send_html(HTTPStatus.OK, DASHBOARD_HTML.replace("__NOTAFFECTED_TOKEN__", page_token))
+            return
+        if self.remote_mode and parsed.path.startswith("/api/") and not self._has_valid_token():
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "Missing or invalid request token"})
             return
         if parsed.path == "/api/targets":
             self._send_json(HTTPStatus.OK, get_targets_metadata())
@@ -2275,8 +2303,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
                 {"error": "Forbidden cross-origin or non-JSON request"},
             )
             return
-        sent_token = self.headers.get("X-Notaffected-Token") or ""
-        if not hmac.compare_digest(sent_token.encode("utf-8"), self.request_token.encode("utf-8")):
+        if not self._has_valid_token():
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "Missing or invalid request token"})
             return
         parsed = urllib.parse.urlparse(self.path)

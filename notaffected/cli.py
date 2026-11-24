@@ -70,16 +70,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use the AI provider you configured (NOTAFFECTED_LLM_*) to extract preconditions from prose",
     )
+    p_spec.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip live advisory network queries; use built-in rules and local cache only",
+    )
 
     # `notaffected scan`
     p_scan = sub.add_parser(
         "scan",
         help="Auto-scan hosts against built-in rules, live OSV package batch API, and CISA KEV feed",
-    )
-    p_scan.add_argument(
-        "--offline",
-        action="store_true",
-        help="Skip live OSV and CISA KEV network queries; evaluate built-in rules only",
     )
     _add_target_and_output_args(p_scan)
 
@@ -215,6 +215,11 @@ def _add_target_and_output_args(p: argparse.ArgumentParser) -> None:
         help="Generate a post-verdict AI/operational risk and remediation safety briefing",
     )
     p.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip live advisory network queries; use built-in rules and local cache only",
+    )
+    p.add_argument(
         "--fail-on-affected",
         action="store_true",
         help="Exit with code 1 if any host is AFFECTED",
@@ -227,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     console = Console()
 
     if args.command == "spec":
-        spec = resolve_check_spec(args.cve, use_llm=args.llm)
+        spec = resolve_check_spec(args.cve, use_llm=args.llm, offline=args.offline)
         render_spec(spec, console=console)
         return 0
 
@@ -284,17 +289,17 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "check":
         non_builtin = [c for c in args.cves if c.strip().upper() not in BUILTIN_SPECS]
-        if len(non_builtin) > 1:
+        if not args.offline and len(non_builtin) > 1:
             fetch_advisories_concurrent(non_builtin)
         specs = [
-            resolve_check_spec(cve, use_llm=args.llm) for cve in args.cves
+            resolve_check_spec(cve, use_llm=args.llm, offline=args.offline) for cve in args.cves
         ]
     elif args.command == "filter":
         findings = parse_scanner_json(args.scan_file)
         non_builtin = [
             f.cve_id for f in findings if f.cve_id.strip().upper() not in BUILTIN_SPECS
         ]
-        if len(non_builtin) > 1:
+        if not args.offline and len(non_builtin) > 1:
             fetch_advisories_concurrent(non_builtin)
         specs = []
         seen_findings: set[tuple[str, str | None]] = set()
@@ -310,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
                     use_llm=args.llm,
                     package_hint=f.package_name,
                     fixed_version_hint=f.fixed_version,
+                    offline=args.offline,
                     package_class=f.package_class,
                 )
             )

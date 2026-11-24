@@ -565,7 +565,7 @@ def _package_probe_core(pre: Precondition, runner: HostRunner, facts: dict[str, 
 
 def _probe_kernel_module(pre: Precondition, runner: HostRunner) -> ProbeResult:
     mod_name = str(pre.params.get("module") or "").strip()
-    if not re.fullmatch(r"[a-z0-9_-]+", mod_name):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", mod_name):
         return ProbeResult(
             precondition=pre,
             status=ProbeStatus.UNKNOWN,
