@@ -199,7 +199,10 @@ def _is_lab_runner(runner: HostRunner) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
-def apply_host_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
+def apply_host_mitigation(
+    payload: dict[str, Any],
+    custom_rules: dict[str, CheckSpec] | None = None,
+) -> dict[str, Any]:
     """Execute an allowlisted CheckSpec mitigation command on the specified host runner."""
     target_mode = str(payload.get("target_mode") or "docker_discovered")
     custom_target_type = str(payload.get("custom_target_type") or "")
@@ -211,10 +214,11 @@ def apply_host_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
     except (ValueError, TypeError):
         mit_idx = -1
 
-    if not host or not _CVE_TOKEN_RE.match(cve_id) or mit_idx < 0:
+    is_known_custom = bool(custom_rules and cve_id in custom_rules)
+    if not host or (not _CVE_TOKEN_RE.match(cve_id) and not is_known_custom) or mit_idx < 0:
         return {"ok": False, "error": "Invalid host, CVE ID, or mitigation index"}
 
-    spec = resolve_check_spec(cve_id, use_llm=False)
+    spec = resolve_check_spec(cve_id, use_llm=False, custom_rules=custom_rules)
     if mit_idx >= len(spec.mitigation):
         return {"ok": False, "error": f"Mitigation index {mit_idx} out of range for {cve_id}"}
 
@@ -293,7 +297,10 @@ def apply_host_mitigation(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
+def evaluate_dashboard_request(
+    payload: dict[str, Any],
+    custom_rules: dict[str, CheckSpec] | None = None,
+) -> dict[str, Any]:
     """Execute a dashboard scan or targeted CVE check and return JSON-serializable results."""
     target_mode = str(payload.get("target_mode") or "docker_discovered")
     custom_target_type = str(payload.get("custom_target_type") or "")
@@ -301,9 +308,11 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
     scan_mode = str(payload.get("scan_mode") or "live_scan")
     offline = bool(payload.get("offline", False))
     use_llm = bool(payload.get("use_llm", False))
+    custom_map = {k.upper(): v for k, v in (custom_rules or {}).items()}
 
     feed_meta: dict[str, Any] = {
         "builtin_count": len(BUILTIN_SPECS),
+        "custom_count": len(custom_map),
         "osv_live_cves": [],
         "cisa_kev_cves": [],
         "total_cves": 0,
@@ -347,16 +356,24 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
             tokens = [str(c).strip().upper() for c in raw_cves if str(c).strip()]
         else:
             tokens = []
-        cve_list = [t for t in dict.fromkeys(tokens) if _CVE_TOKEN_RE.match(t)][
-            :MAX_CUSTOM_CVES
-        ]
+        cve_list = [
+            t
+            for t in dict.fromkeys(tokens)
+            if _CVE_TOKEN_RE.match(t) or t in custom_map
+        ][:MAX_CUSTOM_CVES]
         if not cve_list:
-            cve_list = list(BUILTIN_SPECS.keys())
-        non_builtin = [c for c in cve_list if not offline and c not in BUILTIN_SPECS]
+            cve_list = list(dict.fromkeys(list(BUILTIN_SPECS.keys()) + list(custom_map.keys())))
+        non_builtin = [
+            c
+            for c in cve_list
+            if not offline and c not in BUILTIN_SPECS and c not in custom_map
+        ]
         if len(non_builtin) > 1:
             fetch_advisories_concurrent(non_builtin)
         specs: list[CheckSpec] = [
-            resolve_check_spec(cid, use_llm=use_llm, offline=offline)
+            resolve_check_spec(
+                cid, use_llm=use_llm, offline=offline, custom_rules=custom_map
+            )
             for cid in cve_list
         ]
         feed_meta["total_cves"] = len(specs)
@@ -383,7 +400,9 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
         non_builtin = [
             f.cve_id
             for f in findings[:MAX_CUSTOM_CVES]
-            if not offline and f.cve_id.strip().upper() not in BUILTIN_SPECS
+            if not offline
+            and f.cve_id.strip().upper() not in BUILTIN_SPECS
+            and f.cve_id.strip().upper() not in custom_map
         ]
         if len(non_builtin) > 1:
             fetch_advisories_concurrent(non_builtin)
@@ -401,6 +420,7 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
                     fixed_version_hint=f.fixed_version,
                     offline=offline,
                     package_class=f.package_class,
+                    custom_rules=custom_map,
                 )
             )
         if not specs and not explicit_report:
@@ -415,6 +435,7 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
                 runners,
                 offline=offline,
                 use_llm=use_llm,
+                custom_rules=custom_map,
             )
             if target_error:
                 feed_meta["error"] = target_error
@@ -458,7 +479,9 @@ def evaluate_dashboard_request(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_targets_metadata() -> dict[str, Any]:
+def get_targets_metadata(
+    custom_rules: dict[str, CheckSpec] | None = None,
+) -> dict[str, Any]:
     """Return discovered Docker containers, inventory availability, and built-in CVEs."""
     containers = discover_docker_containers()
     return {
@@ -467,6 +490,7 @@ def get_targets_metadata() -> dict[str, Any]:
         "docker_containers": containers,
         "has_lab_inventory": Path("lab/inventory.yaml").is_file(),
         "has_custom_inventory": Path("inventory.yaml").is_file(),
+        "custom_rules_count": len(custom_rules or {}),
         "builtin_cves": [
             {
                 "cve_id": s.cve_id,
@@ -2058,9 +2082,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           bannerEl.style.color = "var(--subtle)";
           const osvCount = (fm.osv_live_cves || []).length;
           const kevCount = (fm.cisa_kev_cves || []).length;
+          const customPart = fm.custom_count ? ` · Custom YAML: ${fm.custom_count}` : "";
           bannerEl.textContent =
             `Evaluated ${s.hosts_evaluated || 0} host(s) across ${s.cves_evaluated || 0} CVE(s) · ` +
-            `Built-in: ${fm.builtin_count || 0} · Live OSV: ${osvCount} · CISA KEV: ${kevCount}`;
+            `Built-in: ${fm.builtin_count || 0}${customPart} · Live OSV: ${osvCount} · CISA KEV: ${kevCount}`;
         }
 
         document.getElementById("btnExportVex").disabled = false;
@@ -2218,6 +2243,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
     # process or a non-browser client cannot drive /api/* without first loading the page.
     request_token: str = secrets.token_urlsafe(32)
     remote_mode: bool = False
+    custom_rules: dict[str, CheckSpec] = {}
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         return
@@ -2283,15 +2309,15 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "Missing or invalid request token"})
             return
         if parsed.path == "/api/targets":
-            self._send_json(HTTPStatus.OK, get_targets_metadata())
+            self._send_json(HTTPStatus.OK, get_targets_metadata(custom_rules=self.custom_rules))
             return
         if parsed.path == "/api/spec":
             qs = urllib.parse.parse_qs(parsed.query)
             cve = (qs.get("cve") or [""])[0].strip().upper()
-            if not cve or not _CVE_TOKEN_RE.match(cve):
+            if not cve or (not _CVE_TOKEN_RE.match(cve) and cve not in self.custom_rules):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Invalid or missing cve query parameter"})
                 return
-            spec = resolve_check_spec(cve, use_llm=False)
+            spec = resolve_check_spec(cve, use_llm=False, custom_rules=self.custom_rules)
             self._send_json(HTTPStatus.OK, spec.to_dict())
             return
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
@@ -2334,12 +2360,12 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/mitigate":
-            mit_res = apply_host_mitigation(payload)
+            mit_res = apply_host_mitigation(payload, custom_rules=self.custom_rules)
             status = HTTPStatus.OK if mit_res.get("ok") else HTTPStatus.BAD_REQUEST
             self._send_json(status, mit_res)
             return
 
-        result = evaluate_dashboard_request(payload)
+        result = evaluate_dashboard_request(payload, custom_rules=self.custom_rules)
         self._send_json(HTTPStatus.OK, result)
 
 
@@ -2360,11 +2386,17 @@ def check_bind_address(host: str, allow_remote: bool = False) -> None:
         )
 
 
-def run_web_server(host: str = "127.0.0.1", port: int = 8484, allow_remote: bool = False) -> None:
+def run_web_server(
+    host: str = "127.0.0.1",
+    port: int = 8484,
+    allow_remote: bool = False,
+    custom_rules: dict[str, CheckSpec] | None = None,
+) -> None:
     """Start the local notaffected Web UI server (loopback only unless `allow_remote`)."""
     check_bind_address(host, allow_remote)
     is_remote = host.strip().lower() not in ("127.0.0.1", "::1", "localhost")
     DashboardRequestHandler.remote_mode = is_remote
+    DashboardRequestHandler.custom_rules = dict(custom_rules or {})
     DashboardRequestHandler.request_token = (
         (os.environ.get("NOTAFFECTED_REMOTE_TOKEN") or "").strip()
         if is_remote

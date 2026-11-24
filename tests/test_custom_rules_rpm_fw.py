@@ -133,6 +133,29 @@ def test_cli_rules_flag_e2e_and_error_exit(tmp_path: Path) -> None:
     # Missing rules path fails fast with exit code 2
     assert main(["spec", "CVE-2026-40123", "--rules", str(tmp_path / "missing.yaml")]) == 2
     assert main(["check", "CVE-2026-40123", "--demo-fleet", "--rules", str(tmp_path / "missing.yaml")]) == 2
+    assert main(["ui", "--rules", str(tmp_path / "missing.yaml")]) == 2
+
+
+def test_web_dashboard_custom_rules_integration() -> None:
+    from notaffected.web import evaluate_dashboard_request, get_targets_metadata
+
+    example = Path(__file__).resolve().parent.parent / "examples" / "custom-rule.yaml"
+    rules = load_custom_rules([example])
+
+    meta = get_targets_metadata(custom_rules=rules)
+    assert meta["custom_rules_count"] == 1
+
+    res = evaluate_dashboard_request(
+        {
+            "target_mode": "demo_fleet",
+            "scan_mode": "live_scan",
+            "offline": True,
+        },
+        custom_rules=rules,
+    )
+    assert res["feed_meta"]["custom_count"] == 1
+    assert res["summary"]["cves_evaluated"] == len(BUILTIN_SPECS) + 1
+    assert any(s["cve_id"] == "CVE-2026-40123" and s["source"] == "custom-yaml" for s in res["specs"])
 
 
 # ---------------------------------------------------------------------------

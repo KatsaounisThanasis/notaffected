@@ -93,6 +93,18 @@ notaffected init --discover-docker -o inventory.yaml
 
 # Scan your fleet against built-in rules, live OSV package batch API, and CISA KEV feed
 notaffected scan -i inventory.yaml --emit-vex vex.json --html report.html
+
+# Try immediately with the built-in 5-host Linux + Windows Server demo fleet (100% offline)
+notaffected scan --demo-fleet --offline --emit-vex demo.vex.json --html demo.html
+```
+
+Example CLI summary on the mixed 5-host demo fleet (35 scanner-equivalent alerts cut down to 4 real exposures):
+```text
+Auto-Scan Feed: 7 built-in rules | 0 live OSV package CVEs | 0 live CISA KEV CVEs
+AFFECTED (4)            prod-edge-api-01 (CVE-2026-98432, CVE-2024-6387)
+                        win-dc-01        (CVE-2024-38063, CVE-2021-34527)
+NOT AFFECTED (31)       88.6% false-positive noise cut with OpenVEX v0.2.0 proof
+OpenVEX v0.2.0 written to: demo.vex.json (35 statement(s))
 ```
 
 ### 3. Inspect extracted preconditions & mitigations for any CVE
@@ -124,11 +136,12 @@ trivy rootfs --vex vex.json /
 ```
 
 ### 6. Custom YAML CheckSpec Rules (`--rules`)
-Author your own deterministic rules (or override built-in specs) in YAML without editing Python. Pass a file or a directory of `.yaml`/`.yml` files to `spec`, `check`, `filter`, or `scan` (see `examples/custom-rule.yaml`):
+Author your own deterministic rules (or override built-in specs) in YAML without editing Python. Pass a file or a directory of `.yaml`/`.yml` files to `spec`, `check`, `filter`, `scan`, or `ui` (see `examples/custom-rule.yaml`):
 ```bash
 notaffected spec CVE-2026-40123 --rules examples/custom-rule.yaml
 notaffected check CVE-2026-40123 --demo-fleet --rules examples/custom-rule.yaml --offline
 notaffected scan --demo-fleet --offline --rules ./my-rules-dir/
+notaffected ui --rules examples/custom-rule.yaml
 ```
 Every custom rule is strictly validated against the closed set of 12 read-only probes, per-OS probe allowlists, required/optional parameter names, and OpenVEX justification values.
 

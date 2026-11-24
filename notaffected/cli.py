@@ -136,6 +136,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow --bind on a non-loopback address (the dashboard can run probes over SSH with your keys)",
     )
+    p_ui.add_argument(
+        "--rules",
+        action="append",
+        dest="rules_paths",
+        type=Path,
+        default=None,
+        help="Path to a custom YAML CheckSpec rule file or directory (may be passed multiple times)",
+    )
 
     return parser
 
@@ -278,12 +286,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "ui":
+        try:
+            custom_rules = load_custom_rules(args.rules_paths)
+        except ValueError as exc:
+            console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
+            return 2
         check_bind_address(args.bind, args.allow_remote)
+        if custom_rules:
+            console.print(
+                f"[dim]Loaded {len(custom_rules)} custom YAML rule(s) for Web Dashboard[/dim]"
+            )
         console.print(
             f"[bold cyan]notaffected Web Dashboard listening on:[/bold cyan] "
             f"http://{args.bind}:{args.port} (Press Ctrl+C to stop)"
         )
-        run_web_server(host=args.bind, port=args.port, allow_remote=args.allow_remote)
+        run_web_server(
+            host=args.bind,
+            port=args.port,
+            allow_remote=args.allow_remote,
+            custom_rules=custom_rules,
+        )
         return 0
 
     if args.demo_fleet:
