@@ -1,13 +1,14 @@
 # notaffected
 
 [![CI](https://github.com/KatsaounisThanasis/notaffected/actions/workflows/ci.yml/badge.svg)](https://github.com/KatsaounisThanasis/notaffected/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/notaffected.svg)](https://pypi.org/project/notaffected/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![OpenVEX v0.2.0](https://img.shields.io/badge/OpenVEX-v0.2.0-22c55e.svg)](https://openvex.dev/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-slate.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-slate.svg)](https://github.com/KatsaounisThanasis/notaffected/blob/main/LICENSE)
 
 **From 10,000 noisy CVE alerts down to the 3 that actually matter — with deterministic proof and OpenVEX output for all the rest.**
 
-![notaffected Web Dashboard](docs/dashboard.png)
+![notaffected Web Dashboard](https://raw.githubusercontent.com/KatsaounisThanasis/notaffected/main/docs/dashboard.png)
 
 Every week dozens of new CVEs are published, and AI-assisted research is finding them faster than ever. Traditional vulnerability scanners (Trivy, Grype, Qualys, Nessus) only check package versions: *"You have package X at version Y, therefore you are vulnerable."* They do not know whether the vulnerable code path or service can actually be triggered on your machine. It is like a smoke alarm that goes off every time you make toast: eventually you either panic or mute it.
 
@@ -24,7 +25,7 @@ Every week dozens of new CVEs are published, and AI-assisted research is finding
 
 ## Architecture
 
-![notaffected Architecture](docs/architecture.png)
+![notaffected Architecture](https://raw.githubusercontent.com/KatsaounisThanasis/notaffected/main/docs/architecture.png)
 
 ### Closed Set of 12 Read-Only Probes (Linux & Windows Server)
 
@@ -49,7 +50,24 @@ The justification column shows the default per probe. Built-in specs set it per 
 
 ## Installation
 
+Run without installing globally via `uvx` or install with `pipx` / `pip`:
+
 ```bash
+# Instant run (uv)
+uvx notaffected ui
+
+# Isolated CLI install (pipx)
+pipx install notaffected
+
+# Standard pip install
+pip install notaffected
+```
+
+For local development from source:
+
+```bash
+git clone https://github.com/KatsaounisThanasis/notaffected.git
+cd notaffected
 uv venv && uv pip install -e ".[dev]"
 ```
 
