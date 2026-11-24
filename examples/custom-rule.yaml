@@ -1,0 +1,42 @@
+# Example custom CheckSpec rule for `notaffected --rules examples/custom-rule.yaml`
+#
+# Supports a single rule mapping, a top-level list, or a `rules:` list.
+# Every precondition is validated against the closed set of 12 read-only probes.
+# Usage:
+#   notaffected spec CVE-2026-40123 --rules examples/custom-rule.yaml
+#   notaffected check CVE-2026-40123 --demo-fleet --rules examples/custom-rule.yaml
+#   notaffected scan --demo-fleet --offline --rules examples/custom-rule.yaml
+
+rules:
+  - cve_id: CVE-2026-40123
+    summary: "Redis unauthenticated remote exposure when bound to a non-loopback interface without firewall block"
+    severity: HIGH
+    os_family: linux
+    confidence: high
+    preconditions:
+      - probe: package_installed_vulnerable
+        params:
+          package: redis-server
+          fixed_version: "5:7.0.15-1ubuntu0.24.04.2"
+        description: "Package 'redis-server' is installed and older than fixed version"
+        justification_if_not_met: component_not_present
+      - probe: network_listener
+        params:
+          proto: tcp
+          port: 6379
+          scope: non_loopback
+        description: "TCP port 6379 is listening on a non-loopback interface"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+      - probe: firewall_allows_port
+        params:
+          proto: tcp
+          port: 6379
+        description: "Host firewall permits incoming TCP traffic to port 6379"
+        justification_if_not_met: inline_mitigations_already_exist
+    mitigation:
+      - "sudo ufw deny 6379/tcp"
+      - "sudo systemctl disable --now redis-server.service"
+    patch:
+      status: released
+      fixed_version: "5:7.0.15-1ubuntu0.24.04.2"
+      pocket: noble-security

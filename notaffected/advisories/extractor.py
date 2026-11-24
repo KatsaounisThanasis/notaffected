@@ -81,8 +81,8 @@ PROBE_OPTIONAL_PARAMS: dict[str, tuple[str, ...]] = {
     "network_listener": ("port", "process", "scope"),
     "firewall_allows_port": ("port",),
     "systemd_service_active": (),
-    "process_running": (),
-    "config_contains": ("negate",),
+    "process_running": ("socket_unit",),
+    "config_contains": ("negate", "semantics", "directive"),
     "windows_build_vulnerable": ("fixed_build",),
     "windows_registry_equals": ("negate",),
     "windows_service_active": (),
@@ -143,13 +143,17 @@ def resolve_check_spec(
     fixed_version_hint: str | None = None,
     offline: bool = False,
     package_class: str | None = None,
+    custom_rules: dict[str, CheckSpec] | None = None,
 ) -> CheckSpec:
-    """Resolve a CheckSpec for `cve_id`: built-in golden spec first, then OSV + Ubuntu OSV + heuristics/LLM.
+    """Resolve a CheckSpec for `cve_id`: custom YAML rules first, then built-in golden spec,
+    then OSV + Ubuntu/Debian/Red Hat/MSRC + heuristics/LLM.
 
     `package_class="lang"` (a scanner finding in a pip/npm/jar/... package) yields a spec with no
     host probes: dpkg/rpm/apk cannot see language packages, so "not installed" would be a false proof.
     """
     norm_id = cve_id.strip().upper()
+    if custom_rules and norm_id in custom_rules:
+        return custom_rules[norm_id]
     if package_class == "lang":
         return CheckSpec(
             cve_id=norm_id,
@@ -820,6 +824,8 @@ def _extract_release_fixes(osv_data: dict[str, Any], pkg_name: str) -> dict[str,
         m_deb = re.search(r"debian:(\d+)", eco_low)
         m_alp = re.search(r"alpine:v?(\d+\.\d+)", eco_low)
         m_rhel = re.search(r"(?:red\s*hat|rhel):(\d+)", eco_low)
+        m_rocky = re.search(r"rocky(?:\s*linux)?:(\d+)", eco_low)
+        m_alma = re.search(r"alma(?:linux)?:(\d+)", eco_low)
         if m_ubu:
             rel_key = f"ubuntu:{m_ubu.group(1)}"
         elif m_deb:
@@ -828,6 +834,10 @@ def _extract_release_fixes(osv_data: dict[str, Any], pkg_name: str) -> dict[str,
             rel_key = f"alpine:{m_alp.group(1)}"
         elif m_rhel:
             rel_key = f"rhel:{m_rhel.group(1)}"
+        elif m_rocky:
+            rel_key = f"rocky:{m_rocky.group(1)}"
+        elif m_alma:
+            rel_key = f"almalinux:{m_alma.group(1)}"
         if not rel_key:
             continue
         # Every listed release is recorded; "" = listed as affected with no fix yet.

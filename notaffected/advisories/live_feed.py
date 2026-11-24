@@ -285,13 +285,18 @@ def collect_scan_specs(
     use_llm: bool = False,
     max_kev: int = 4,
     cache_dir: Path | None = None,
+    custom_rules: dict[str, CheckSpec] | None = None,
 ) -> tuple[list[CheckSpec], dict[str, Any]]:
     """Build the full list of CheckSpecs for `notaffected scan`:
-    1. All built-in golden specs (Linux + Windows Server).
-    2. Live OSV `/v1/querybatch` results for installed packages on Linux targets.
-    3. Live CISA KEV actively exploited vulnerabilities feed.
+    1. User-supplied custom YAML rules (`--rules`, overriding matching built-ins).
+    2. All built-in golden specs (Linux + Windows Server).
+    3. Live OSV `/v1/querybatch` results for installed packages on Linux targets.
+    4. Live CISA KEV actively exploited vulnerabilities feed.
     """
-    specs: list[CheckSpec] = list(BUILTIN_SPECS.values())
+    custom_map = {k.upper(): v for k, v in (custom_rules or {}).items()}
+    merged_curated: dict[str, CheckSpec] = dict(BUILTIN_SPECS)
+    merged_curated.update(custom_map)
+    specs: list[CheckSpec] = list(merged_curated.values())
     seen_ids: set[str] = {s.cve_id.upper() for s in specs}
     osv_live_ids: list[str] = []
     kev_live_ids: list[str] = []
@@ -308,6 +313,7 @@ def collect_scan_specs(
                     use_llm=use_llm,
                     cache_dir=cache_dir,
                     package_hint=pkg_name,
+                    custom_rules=custom_map,
                 )
             )
 
@@ -320,7 +326,9 @@ def collect_scan_specs(
                 continue
             seen_ids.add(cve_id)
             kev_live_ids.append(cve_id)
-            spec = resolve_check_spec(cve_id, use_llm=use_llm, cache_dir=cache_dir)
+            spec = resolve_check_spec(
+                cve_id, use_llm=use_llm, cache_dir=cache_dir, custom_rules=custom_map
+            )
             if spec.source == "fallback":
                 osv_like = _kev_item_to_osv_like(item)
                 spec = extract_from_osv_payload(cve_id, osv_like, use_llm=use_llm)
@@ -328,6 +336,7 @@ def collect_scan_specs(
 
     feed_meta: dict[str, Any] = {
         "builtin_count": len(BUILTIN_SPECS),
+        "custom_count": len(custom_map),
         "osv_live_cves": osv_live_ids,
         "cisa_kev_cves": kev_live_ids,
         "total_cves": len(specs),

@@ -265,6 +265,187 @@ def _read_os_release(runner: HostRunner) -> tuple[str, str]:
     return distro_id, ver_id
 
 
+_RPM_TOKEN_RE = re.compile(r"^[A-Za-z0-9._+~^]+$")
+_NON_RPM_FIX_RE = re.compile(
+    r"(ubuntu|\+deb\d+|~deb\d+|~bpo\d+|\+dfsg|\+ds\d|build\d|-r\d+$)",
+    re.IGNORECASE,
+)
+_RHEL_CLONE_IDS = frozenset({"rocky", "almalinux"})
+_RPM_MAJOR_IDS = frozenset({"rhel", "rocky", "almalinux", "centos", "ol", "fedora"})
+
+
+def _rpmvercmp(a: str, b: str) -> int:
+    """Pure-Python implementation of RPM's `rpmvercmp` segment comparator.
+
+    Matches upstream rpmio/rpmvercmp.c semantics:
+    - Non-alphanumeric separators (other than `~` and `^`) are skipped.
+    - `~` (pre-release) sorts before anything, including end-of-string.
+    - `^` (post-release snapshot) sorts after end-of-string, before any other char.
+    - Numeric segments always sort newer than alphabetic segments.
+    - Numeric segments compare by integer value (ignoring leading zeros).
+    """
+    if a == b:
+        return 0
+    la, lb = len(a), len(b)
+    i = j = 0
+    while i < la or j < lb:
+        while i < la and not (a[i].isascii() and a[i].isalnum()) and a[i] not in ("~", "^"):
+            i += 1
+        while j < lb and not (b[j].isascii() and b[j].isalnum()) and b[j] not in ("~", "^"):
+            j += 1
+
+        if (i < la and a[i] == "~") or (j < lb and b[j] == "~"):
+            if i >= la or a[i] != "~":
+                return 1
+            if j >= lb or b[j] != "~":
+                return -1
+            i += 1
+            j += 1
+            continue
+
+        if (i < la and a[i] == "^") or (j < lb and b[j] == "^"):
+            if i >= la:
+                return -1
+            if j >= lb:
+                return 1
+            if a[i] != "^":
+                return 1
+            if b[j] != "^":
+                return -1
+            i += 1
+            j += 1
+            continue
+
+        if i >= la or j >= lb:
+            break
+
+        is_num_a = a[i].isdigit()
+        is_num_b = b[j].isdigit()
+        if is_num_a:
+            start_a = i
+            while i < la and a[i].isdigit():
+                i += 1
+            seg_a = a[start_a:i]
+        else:
+            start_a = i
+            while i < la and a[i].isascii() and a[i].isalpha():
+                i += 1
+            seg_a = a[start_a:i]
+
+        if is_num_b:
+            start_b = j
+            while j < lb and b[j].isdigit():
+                j += 1
+            seg_b = b[start_b:j]
+        else:
+            start_b = j
+            while j < lb and b[j].isascii() and b[j].isalpha():
+                j += 1
+            seg_b = b[start_b:j]
+
+        if is_num_a != is_num_b:
+            return 1 if is_num_a else -1
+
+        if is_num_a:
+            na, nb = int(seg_a), int(seg_b)
+            if na != nb:
+                return -1 if na < nb else 1
+        else:
+            if seg_a != seg_b:
+                return -1 if seg_a < seg_b else 1
+
+    if i == la and j == lb:
+        return 0
+    return -1 if i == la else 1
+
+
+def _split_rpm_evr(raw: str) -> tuple[int, bool, str, str] | None:
+    """Parse an RPM EVR `[epoch:]version[-release]` into `(epoch, has_epoch, version, release)`."""
+    s = raw.strip()
+    if not s or any(ch.isspace() for ch in s):
+        return None
+    has_epoch = False
+    epoch = 0
+    if ":" in s:
+        ep_str, s = s.split(":", 1)
+        if not ep_str.isdigit():
+            return None
+        epoch = int(ep_str)
+        has_epoch = True
+    if not s:
+        return None
+    if "-" in s:
+        ver, rel = s.split("-", 1)
+        if not ver or not rel or "-" in rel:
+            return None
+    else:
+        ver, rel = s, ""
+    if not _RPM_TOKEN_RE.fullmatch(ver):
+        return None
+    if rel and not _RPM_TOKEN_RE.fullmatch(rel):
+        return None
+    return epoch, has_epoch, ver, rel
+
+
+def _rpm_evr_lt(installed: str, fixed: str) -> bool | None:
+    """Return True if RPM EVR `installed < fixed`, False if `>=`, or None if incomparable.
+
+    Refuses cross-distro Debian/Ubuntu/Alpine fix strings and refuses comparing against a
+    non-zero fixed epoch when the installed version omitted its epoch.
+    """
+    if not installed or not fixed:
+        return None
+    if _NON_RPM_FIX_RE.search(fixed):
+        return None
+    inst = _split_rpm_evr(installed)
+    fix = _split_rpm_evr(fixed)
+    if inst is None or fix is None:
+        return None
+    inst_ep, inst_has_ep, inst_ver, inst_rel = inst
+    fix_ep, _, fix_ver, fix_rel = fix
+    if not inst_has_ep and fix_ep != 0:
+        return None
+    if inst_ep != fix_ep:
+        return inst_ep < fix_ep
+    vcmp = _rpmvercmp(inst_ver, fix_ver)
+    if vcmp != 0:
+        return vcmp < 0
+    if not fix_rel:
+        return False
+    if not inst_rel:
+        return True
+    return _rpmvercmp(inst_rel, fix_rel) < 0
+
+
+def _match_release_fix_key(
+    distro_id: str,
+    ver_id: str,
+    release_fixes: dict[object, object],
+) -> str | None:
+    """Find the matching key in `release_fixes` for `(distro_id, ver_id)`.
+
+    Checks exact `<id>:<ver>`, then `<id>:<major>` for RPM distros whose `/etc/os-release`
+    reports minor versions (e.g. `rhel:9.4` -> `rhel:9`, `rocky:9.4` -> `rocky:9`), and finally
+    `rhel:<major>` for binary-compatible RHEL rebuilds (`rocky`, `almalinux`).
+    """
+    if not distro_id or not ver_id:
+        return None
+    exact = f"{distro_id}:{ver_id}"
+    if exact in release_fixes:
+        return exact
+    if distro_id in _RPM_MAJOR_IDS:
+        major = ver_id.split(".", 1)[0]
+        if major.isdigit():
+            major_key = f"{distro_id}:{major}"
+            if major_key in release_fixes:
+                return major_key
+            if distro_id in _RHEL_CLONE_IDS:
+                rhel_key = f"rhel:{major}"
+                if rhel_key in release_fixes:
+                    return rhel_key
+    return None
+
+
 def _resolve_host_release_fix(
     runner: HostRunner,
     release_fixes: object,
@@ -286,9 +467,9 @@ def _resolve_host_release_fix(
         if k in release_fixes:
             return str(release_fixes[k] or ""), k
     distro_id, ver_id = _read_os_release(runner)
-    key = f"{distro_id}:{ver_id}" if distro_id and ver_id else ""
-    if key and key in release_fixes:
-        return str(release_fixes[key] or ""), key
+    matched = _match_release_fix_key(distro_id, ver_id, release_fixes)
+    if matched is not None:
+        return str(release_fixes[matched] or ""), matched
     return None
 
 
@@ -297,9 +478,9 @@ def _release_not_covered(pre: Precondition, runner: HostRunner, release_fixes: o
     if not isinstance(release_fixes, dict) or not release_fixes:
         return None
     distro_id, ver_id = _read_os_release(runner)
-    key = f"{distro_id}:{ver_id}" if distro_id and ver_id else ""
-    if key in release_fixes:
+    if _match_release_fix_key(distro_id, ver_id, release_fixes) is not None:
         return None
+    key = f"{distro_id}:{ver_id}" if distro_id and ver_id else ""
     return ProbeResult(
         precondition=pre,
         status=ProbeStatus.UNKNOWN,
@@ -325,7 +506,15 @@ def _try_apk_or_rpm_package(
         ver = first[len(prefix):] if first.startswith(prefix) else first
         return ("ii", ver, f"apk info -e -v {pkg}")
 
-    rpm_res = runner.run(["rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\\n", pkg])
+    # Prefer EPOCHNUM:VERSION-RELEASE on RPM 4.11+ so epoch comparisons are exact;
+    # fall back to VERSION-RELEASE if EPOCHNUM is unsupported or unmocked.
+    rpm_res = runner.run(["rpm", "-q", "--qf", "%{EPOCHNUM}:%{VERSION}-%{RELEASE}\\n", pkg])
+    if (
+        rpm_res.transport_error
+        or rpm_res.returncode == 127
+        or (rpm_res.returncode == 0 and "%{EPOCHNUM}" in rpm_res.stdout)
+    ):
+        rpm_res = runner.run(["rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\\n", pkg])
     if not rpm_res.transport_error and rpm_res.returncode != 127:
         if rpm_res.returncode != 0 or not rpm_res.stdout.strip():
             if rpm_res.returncode == 1 or "not installed" in (rpm_res.stdout + rpm_res.stderr).lower():
@@ -347,12 +536,15 @@ def _probe_package_installed(pre: Precondition, runner: HostRunner) -> ProbeResu
 
 def _record_package_facts(facts: dict[str, str], runner: HostRunner, purl_type: str, name: str, version: str) -> None:
     m_epoch = re.match(r"^(\d+):(.+)$", version)
+    epoch_val = m_epoch.group(1) if m_epoch else ""
+    if epoch_val == "0":
+        epoch_val = ""
     facts.update(
         {
             "purl_type": purl_type,
             "name": name,
             "version": m_epoch.group(2) if m_epoch else version,
-            "epoch": m_epoch.group(1) if m_epoch else "",
+            "epoch": epoch_val,
             "namespace": _read_os_release(runner)[0],
         }
     )
@@ -535,6 +727,19 @@ def _package_probe_core(pre: Precondition, runner: HostRunner, facts: dict[str, 
                 command=cmd_str,
             )
         is_vuln = apk_cmp.stdout.strip() == "<"
+    elif cmd_str.startswith("rpm "):
+        rpm_lt = _rpm_evr_lt(installed_ver, fixed_version)
+        if rpm_lt is None:
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=(
+                    f"Could not compare RPM EVR versions for '{pkg_display}' ('{installed_ver}' vs "
+                    f"'{fixed_version}'); cross-distro or unreadable EVR"
+                ),
+                command=cmd_str,
+            )
+        is_vuln = rpm_lt
     else:
         cmp_lt = _compare_lt(runner, installed_ver, fixed_version)
         if cmp_lt is None:
@@ -912,6 +1117,361 @@ def _docker_bridge_present(runner: HostRunner) -> bool | None:
     return False if res.returncode == 1 else None
 
 
+_FIREWALLD_SERVICE_PORTS: dict[str, tuple[tuple[int, str], ...]] = {
+    "ssh": ((22, "tcp"),),
+    "http": ((80, "tcp"),),
+    "https": ((443, "tcp"),),
+    "dns": ((53, "tcp"), (53, "udp")),
+    "ipp": ((631, "tcp"), (631, "udp")),
+    "ipp-client": ((631, "udp"),),
+    "mdns": ((5353, "udp"),),
+    "dhcpv6-client": ((546, "udp"),),
+    "samba": ((137, "udp"), (138, "udp"), (139, "tcp"), (445, "tcp")),
+    "cockpit": ((9090, "tcp"),),
+    "smtp": ((25, "tcp"),),
+    "smtps": ((465, "tcp"),),
+    "mysql": ((3306, "tcp"),),
+    "postgresql": ((5432, "tcp"),),
+    "redis": ((6379, "tcp"),),
+    "ntp": ((123, "udp"),),
+    "ldap": ((389, "tcp"),),
+    "ldaps": ((636, "tcp"),),
+    "rdp": ((3389, "tcp"), (3389, "udp")),
+}
+
+
+def _try_firewalld_probe(
+    pre: Precondition,
+    runner: HostRunner,
+    port_raw: str,
+    proto: str,
+) -> ProbeResult | None:
+    """Fallback firewall probe using `firewall-cmd` (RHEL / Rocky / Alma / Fedora)."""
+    state_res = runner.run(["firewall-cmd", "--state"])
+    if state_res.transport_error:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Transport error checking firewalld: {state_res.stderr.strip()}",
+            command="firewall-cmd --state",
+        )
+    if state_res.returncode == 127:
+        return None
+    if state_res.returncode != 0 or "running" not in state_res.stdout.lower():
+        return None
+
+    cmd_str = "firewall-cmd --list-all"
+    list_res = runner.run(["firewall-cmd", "--list-all"])
+    if list_res.transport_error or list_res.returncode != 0 or not list_res.stdout.strip():
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=(
+                "firewalld is running, but `firewall-cmd --list-all` failed: "
+                f"{list_res.stderr.strip() or f'exit {list_res.returncode}'}"
+            ),
+            command=cmd_str,
+        )
+
+    def _unknown(why: str) -> ProbeResult:
+        return ProbeResult(precondition=pre, status=ProbeStatus.UNKNOWN, evidence=why, command=cmd_str)
+
+    def _not_met(why: str) -> ProbeResult:
+        docker = _docker_bridge_present(runner)
+        if docker is None:
+            return _unknown(f"{why}, but Docker could not be ruled out (`ip -o link show docker0` did not answer)")
+        if docker:
+            return _unknown(f"{why}, but Docker is present and its published ports bypass firewalld")
+        return ProbeResult(precondition=pre, status=ProbeStatus.NOT_MET, evidence=why, command=cmd_str)
+
+    target = ""
+    services: list[str] = []
+    ports: list[str] = []
+    protocols: list[str] = []
+    forward_ports: list[str] = []
+    rich_rules: list[str] = []
+    in_rich = False
+    for raw_line in list_res.stdout.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if in_rich:
+            if stripped.startswith("rule ") or not re.match(r"^[a-z-]+:", stripped):
+                rich_rules.append(stripped)
+                continue
+            in_rich = False
+        if stripped.startswith("target:"):
+            target = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("services:"):
+            services = [tok for tok in stripped.split(":", 1)[1].split() if tok]
+        elif stripped.startswith("ports:"):
+            ports = [tok for tok in stripped.split(":", 1)[1].split() if tok]
+        elif stripped.startswith("protocols:"):
+            protocols = [tok for tok in stripped.split(":", 1)[1].split() if tok]
+        elif stripped.startswith("forward-ports:"):
+            val = stripped.split(":", 1)[1].strip()
+            if val:
+                forward_ports.append(val)
+        elif stripped.startswith("rich rules:"):
+            val = stripped.split(":", 1)[1].strip()
+            if val:
+                rich_rules.append(val)
+            in_rich = True
+
+    if target.upper() == "ACCEPT":
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.MET,
+            evidence="firewalld active zone has target: ACCEPT (incoming traffic allowed)",
+            command=cmd_str,
+        )
+    if target.lower() not in ("default", "drop", "%%reject%%", "reject"):
+        return _unknown(f"firewalld active zone has unrecognized target {target!r}")
+
+    if port_raw.lower() != "any":
+        if not port_raw.isdigit():
+            return _unknown(f"Invalid port parameter {port_raw!r}")
+        port = int(port_raw)
+        for token in ports:
+            if "/" not in token:
+                continue
+            p_spec, p_proto = token.split("/", 1)
+            if p_proto.lower() != proto:
+                continue
+            m_range = re.fullmatch(r"(\d+)-(\d+)", p_spec)
+            if (p_spec.isdigit() and int(p_spec) == port) or (
+                m_range and int(m_range.group(1)) <= port <= int(m_range.group(2))
+            ):
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.MET,
+                    evidence=f"firewalld active zone explicitly allows port {token}",
+                    command=cmd_str,
+                )
+        undecided: list[str] = []
+        for svc in services:
+            mapped = _FIREWALLD_SERVICE_PORTS.get(svc.lower())
+            if mapped is None:
+                undecided.append(f"service '{svc}'")
+                continue
+            if (port, proto) in mapped:
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.MET,
+                    evidence=f"firewalld active zone allows service '{svc}' ({port}/{proto})",
+                    command=cmd_str,
+                )
+        if rich_rules:
+            undecided.append(f"{len(rich_rules)} rich rule(s)")
+        if protocols:
+            undecided.append(f"protocols ({', '.join(protocols[:3])})")
+        if forward_ports:
+            undecided.append("forward-ports")
+        if undecided:
+            return _unknown(
+                f"firewalld rules that may allow {port}/{proto} cannot be resolved: {', '.join(undecided[:3])}"
+            )
+        return _not_met(
+            f"firewalld is running (target: {target}) with no open port or service matching {port}/{proto}"
+        )
+
+    # port_raw == "any"
+    matching_ports = [p for p in ports if p.lower().endswith(f"/{proto}")]
+    if matching_ports:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.MET,
+            evidence=f"firewalld active zone allows incoming {proto} port(s): {', '.join(matching_ports[:4])}",
+            command=cmd_str,
+        )
+    matching_svcs = [
+        svc
+        for svc in services
+        if any(sp_proto == proto for _, sp_proto in _FIREWALLD_SERVICE_PORTS.get(svc.lower(), ()))
+    ]
+    if matching_svcs:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.MET,
+            evidence=f"firewalld active zone allows incoming {proto} service(s): {', '.join(matching_svcs[:4])}",
+            command=cmd_str,
+        )
+    unknown_svcs = [svc for svc in services if svc.lower() not in _FIREWALLD_SERVICE_PORTS]
+    if unknown_svcs or rich_rules or protocols or forward_ports:
+        return _unknown(
+            "firewalld has custom services, protocols, or rich rules that cannot be resolved statically"
+        )
+    return _not_met(f"firewalld is running (target: {target}) with no incoming {proto} ports or services allowed")
+
+
+def _nft_dport_matches(spec: str, port: int) -> bool | None:
+    """Match an nftables dport expression (`22`, `8000-9000`, `{ 22, 80, 443 }`). None if unresolved."""
+    cleaned = spec.strip()
+    if not cleaned or cleaned.startswith("@"):
+        return None
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        items = [x.strip() for x in cleaned[1:-1].split(",") if x.strip()]
+    else:
+        items = [cleaned]
+    if not items:
+        return None
+    saw_unknown = False
+    for item in items:
+        m_range = re.fullmatch(r"(\d+)\s*-\s*(\d+)", item)
+        if m_range:
+            if int(m_range.group(1)) <= port <= int(m_range.group(2)):
+                return True
+            continue
+        if item.isdigit():
+            if int(item) == port:
+                return True
+            continue
+        saw_unknown = True
+    return None if saw_unknown else False
+
+
+def _extract_nft_input_chains(ruleset: str) -> list[tuple[str, list[str]]]:
+    """Extract `(policy, rule_lines)` for every `type filter hook input` chain in `nft list ruleset`."""
+    chains: list[tuple[str, list[str]]] = []
+    lines = ruleset.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith("chain ") and "{" in line:
+            depth = line.count("{") - line.count("}")
+            body: list[str] = []
+            i += 1
+            while i < len(lines) and depth > 0:
+                cur = lines[i]
+                depth += cur.count("{") - cur.count("}")
+                if depth > 0:
+                    body.append(cur.strip())
+                i += 1
+            hook_line = next(
+                (b for b in body if re.search(r"\bhook\s+input\b", b)),
+                None,
+            )
+            if hook_line:
+                m_pol = re.search(r"\bpolicy\s+(accept|drop|reject)\b", hook_line)
+                policy = m_pol.group(1) if m_pol else "accept"
+                rules = [b for b in body if b is not hook_line]
+                chains.append((policy, rules))
+            continue
+        i += 1
+    return chains
+
+
+def _try_nftables_probe(
+    pre: Precondition,
+    runner: HostRunner,
+    port_raw: str,
+    proto: str,
+) -> ProbeResult | None:
+    """Fallback firewall probe using `nft list ruleset`."""
+    cmd_str = "nft list ruleset"
+    res = runner.run(["nft", "list", "ruleset"])
+    if res.transport_error:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.UNKNOWN,
+            evidence=f"Transport error checking nftables: {res.stderr.strip()}",
+            command=cmd_str,
+        )
+    if res.returncode != 0 or not res.stdout.strip():
+        return None
+
+    chains = _extract_nft_input_chains(res.stdout)
+    if not chains:
+        return None
+
+    def _unknown(why: str) -> ProbeResult:
+        return ProbeResult(precondition=pre, status=ProbeStatus.UNKNOWN, evidence=why, command=cmd_str)
+
+    def _not_met(why: str) -> ProbeResult:
+        docker = _docker_bridge_present(runner)
+        if docker is None:
+            return _unknown(f"{why}, but Docker could not be ruled out (`ip -o link show docker0` did not answer)")
+        if docker:
+            return _unknown(f"{why}, but Docker is present and its published ports may bypass input filter rules")
+        return ProbeResult(precondition=pre, status=ProbeStatus.NOT_MET, evidence=why, command=cmd_str)
+
+    deny_chains = [(pol, rules) for pol, rules in chains if pol in ("drop", "reject")]
+    if not deny_chains:
+        return ProbeResult(
+            precondition=pre,
+            status=ProbeStatus.MET,
+            evidence="nftables input chain(s) have policy accept (incoming traffic not blocked by default)",
+            command=cmd_str,
+        )
+
+    if port_raw.lower() != "any" and not port_raw.isdigit():
+        return _unknown(f"Invalid port parameter {port_raw!r}")
+    port = int(port_raw) if port_raw.isdigit() else None
+
+    undecided: list[str] = []
+    for _pol, rules in deny_chains:
+        for raw_rule in rules:
+            rule = re.sub(r"\s*#.*$", "", raw_rule).strip().rstrip(";")
+            if not rule:
+                continue
+            # Ignore loopback, established/related state, and ICMP-only accept rules.
+            if re.search(r'\b(?:iif|iifname)\s+"?lo"?\b', rule):
+                continue
+            if re.search(r"\bct\s+state\b.*\b(?:established|related)\b", rule) and "new" not in rule.split():
+                continue
+            if re.search(r"\b(?:icmp|icmpv6|meta\s+l4proto\s+(?:icmp|icmpv6))\b", rule):
+                continue
+            if re.search(r"\b(?:jump|goto)\b", rule):
+                undecided.append(f"non-inline jump/goto ({rule[:48]})")
+                continue
+            if not re.search(r"\baccept\b", rule):
+                continue
+
+            if port is None:
+                # port == "any": any non-loopback/non-established accept rule for this proto or generic
+                other_proto = "udp" if proto == "tcp" else "tcp"
+                if re.search(rf"\b{other_proto}\s+dport\b", rule) and not re.search(rf"\b{proto}\s+dport\b", rule):
+                    continue
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.MET,
+                    evidence=f"nftables input chain has incoming accept rule: {rule}",
+                    command=cmd_str,
+                )
+
+            m_dport = re.search(
+                r"\b(?P<p>tcp|udp|th)\s+dport\s+(?P<spec>\{[^}]+\}|@\S+|\d+\s*-\s*\d+|\d+)",
+                rule,
+            )
+            if m_dport:
+                r_proto = m_dport.group("p")
+                if r_proto != "th" and r_proto != proto:
+                    continue
+                hit = _nft_dport_matches(m_dport.group("spec"), port)
+                if hit is None:
+                    undecided.append(f"unresolved port set ({rule[:48]})")
+                elif hit:
+                    if re.search(r"\b(?:ip|ip6)\s+saddr\b|\b(?:iif|iifname)\b", rule):
+                        undecided.append(f"source/interface-restricted rule ({rule[:48]})")
+                    else:
+                        return ProbeResult(
+                            precondition=pre,
+                            status=ProbeStatus.MET,
+                            evidence=f"nftables input chain accepts {port}/{proto}: {rule}",
+                            command=cmd_str,
+                        )
+            else:
+                undecided.append(f"broad accept rule ({rule[:48]})")
+
+    if undecided:
+        return _unknown(
+            f"nftables rules that may allow {port_raw}/{proto} cannot be resolved: {'; '.join(undecided[:3])}"
+        )
+    return _not_met(
+        f"nftables input chain has policy drop/reject with no incoming accept rule for {port_raw}/{proto}"
+    )
+
+
 def _probe_firewall_allows_port(pre: Precondition, runner: HostRunner) -> ProbeResult:
     port_raw = str(pre.params.get("port") or "any").strip()
     proto = str(pre.params.get("proto") or "tcp").lower().strip()
@@ -998,12 +1558,21 @@ def _probe_firewall_allows_port(pre: Precondition, runner: HostRunner) -> ProbeR
                 if default_deny:
                     return _not_met("ufw is active with 'Default: deny (incoming)' and no incoming ALLOW rules")
 
+    # Fallback to firewalld (RHEL/Rocky/Alma/Fedora) and nftables when ufw is unavailable.
+    if res.returncode != 0 or not res.stdout.strip():
+        fwd_res = _try_firewalld_probe(pre, runner, port_raw, proto)
+        if fwd_res is not None:
+            return fwd_res
+        nft_res = _try_nftables_probe(pre, runner, port_raw, proto)
+        if nft_res is not None:
+            return nft_res
+
     return ProbeResult(
         precondition=pre,
         status=ProbeStatus.UNKNOWN,
         evidence=(
             f"Could not verify firewall policy without root privileges "
-            f"({res.stderr.strip() or 'ufw status unavailable'})"
+            f"({res.stderr.strip() or 'ufw, firewalld, and nftables unavailable'})"
         ),
         command=cmd_str,
     )

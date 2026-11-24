@@ -11,6 +11,7 @@ from rich.markup import escape
 from notaffected import __version__
 from notaffected.advisories.ai_advisor import build_remediation_briefing
 from notaffected.advisories.builtin_specs import BUILTIN_SPECS
+from notaffected.advisories.custom_rules import load_custom_rules
 from notaffected.advisories.extractor import resolve_check_spec
 from notaffected.advisories.fetcher import fetch_advisories_concurrent
 from notaffected.advisories.live_feed import collect_scan_specs
@@ -74,6 +75,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--offline",
         action="store_true",
         help="Skip live advisory network queries; use built-in rules and local cache only",
+    )
+    p_spec.add_argument(
+        "--rules",
+        action="append",
+        dest="rules_paths",
+        type=Path,
+        default=None,
+        help="Path to a custom YAML CheckSpec rule file or directory (may be passed multiple times)",
     )
 
     # `notaffected scan`
@@ -220,6 +229,14 @@ def _add_target_and_output_args(p: argparse.ArgumentParser) -> None:
         help="Skip live advisory network queries; use built-in rules and local cache only",
     )
     p.add_argument(
+        "--rules",
+        action="append",
+        dest="rules_paths",
+        type=Path,
+        default=None,
+        help="Path to a custom YAML CheckSpec rule file or directory (may be passed multiple times)",
+    )
+    p.add_argument(
         "--fail-on-affected",
         action="store_true",
         help="Exit with code 1 if any host is AFFECTED",
@@ -232,7 +249,17 @@ def main(argv: list[str] | None = None) -> int:
     console = Console()
 
     if args.command == "spec":
-        spec = resolve_check_spec(args.cve, use_llm=args.llm, offline=args.offline)
+        try:
+            custom_rules = load_custom_rules(args.rules_paths)
+        except ValueError as exc:
+            console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
+            return 2
+        spec = resolve_check_spec(
+            args.cve,
+            use_llm=args.llm,
+            offline=args.offline,
+            custom_rules=custom_rules,
+        )
         render_spec(spec, console=console)
         return 0
 
@@ -276,28 +303,53 @@ def main(argv: list[str] | None = None) -> int:
             console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
             return 2
 
+    try:
+        custom_rules = load_custom_rules(getattr(args, "rules_paths", None))
+    except ValueError as exc:
+        console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
+        return 2
+
     if args.command == "scan":
         specs, feed_meta = collect_scan_specs(
             runners,
             offline=args.offline,
             use_llm=args.llm,
+            custom_rules=custom_rules,
+        )
+        custom_part = (
+            f" | {feed_meta['custom_count']} custom YAML rules"
+            if feed_meta.get("custom_count")
+            else ""
         )
         console.print(
-            f"[dim]Auto-Scan Feed: {feed_meta['builtin_count']} built-in rules | "
+            f"[dim]Auto-Scan Feed: {feed_meta['builtin_count']} built-in rules{custom_part} | "
             f"{len(feed_meta['osv_live_cves'])} live OSV package CVEs | "
             f"{len(feed_meta['cisa_kev_cves'])} live CISA KEV CVEs[/dim]\n"
         )
     elif args.command == "check":
-        non_builtin = [c for c in args.cves if c.strip().upper() not in BUILTIN_SPECS]
+        non_builtin = [
+            c
+            for c in args.cves
+            if c.strip().upper() not in BUILTIN_SPECS and c.strip().upper() not in custom_rules
+        ]
         if not args.offline and len(non_builtin) > 1:
             fetch_advisories_concurrent(non_builtin)
         specs = [
-            resolve_check_spec(cve, use_llm=args.llm, offline=args.offline) for cve in args.cves
+            resolve_check_spec(
+                cve,
+                use_llm=args.llm,
+                offline=args.offline,
+                custom_rules=custom_rules,
+            )
+            for cve in args.cves
         ]
     elif args.command == "filter":
         findings = parse_scanner_json(args.scan_file)
         non_builtin = [
-            f.cve_id for f in findings if f.cve_id.strip().upper() not in BUILTIN_SPECS
+            f.cve_id
+            for f in findings
+            if f.cve_id.strip().upper() not in BUILTIN_SPECS
+            and f.cve_id.strip().upper() not in custom_rules
         ]
         if not args.offline and len(non_builtin) > 1:
             fetch_advisories_concurrent(non_builtin)
@@ -317,6 +369,7 @@ def main(argv: list[str] | None = None) -> int:
                     fixed_version_hint=f.fixed_version,
                     offline=args.offline,
                     package_class=f.package_class,
+                    custom_rules=custom_rules,
                 )
             )
     else:
