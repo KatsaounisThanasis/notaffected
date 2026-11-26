@@ -22,7 +22,7 @@
 
 <br/>
 
-Traditional vulnerability scanners (Trivy, Grype, Qualys, Nessus) only check package versions. They do not know whether the vulnerable module, service, port, or registry path is actually reachable on your host.
+Package-version vulnerability scans (Trivy, Grype, and standard CVE lists) flag every host carrying a vulnerable library version. They do not verify whether the vulnerable module, service, port, or registry path is reachable at runtime.
 
 `notaffected` turns CVE alerts into deterministic runtime verdicts across Linux and Windows Server (local, SSH, Docker, Kubernetes):
 
@@ -90,8 +90,8 @@ notaffected check CVE-2024-6387 CVE-2024-47176 --host local
 notaffected check CVE-2024-6387 CVE-2024-38063 --ssh ubuntu@10.0.0.10 --win-ssh Administrator@10.0.1.50
 notaffected check CVE-2024-6387 --docker lab-ssh-vuln --k8s prod/worker-pod-0
 
-# Filter a Trivy/Grype JSON scan and feed the OpenVEX output back into Trivy (one VEX per host)
-notaffected filter examples/trivy-scan.json -i lab/inventory.yaml --emit-vex vex.json --html report.html
+# Filter a Trivy/Grype JSON scan for a single host and feed the OpenVEX output back into Trivy
+notaffected filter examples/trivy-scan.json --host local --emit-vex vex.json --html report.html
 trivy rootfs --vex vex.json /
 ```
 

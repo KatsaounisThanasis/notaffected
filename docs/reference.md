@@ -63,7 +63,7 @@ Every custom rule is strictly validated against the closed set of 12 read-only p
 
 ## Local Docker Simulation Lab (`lab/`)
 
-Spin up 4 ultra-lightweight containers (< 2 MB RAM total, 0% idle CPU) simulating vulnerable & mitigated Linux (`CVE-2024-6387`) and Windows Server (`CVE-2024-38063`, `CVE-2021-34527`) targets:
+Spin up 4 lightweight Alpine containers (32 MiB memory cap each) simulating vulnerable & mitigated Linux (`CVE-2024-6387`) and Windows Server (`CVE-2024-38063`, `CVE-2021-34527`) targets:
 
 ```bash
 ./lab/setup_lab.sh
