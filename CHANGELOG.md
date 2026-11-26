@@ -2,6 +2,13 @@
 
 All notable changes to `notaffected` are documented in this file.
 
+## [1.0.1] - 2026-11-26
+
+### Documentation & Polish
+- Tightened `README.md` with the `[✓]` logo, DevSecOps how-it-works visual, and concise quick-start flow; moved the full probe reference, custom YAML rules guide, Docker lab, and BYOM AI provider matrix to `docs/reference.md`.
+- Unified the `[✓]` mark across the local Web Dashboard (`notaffected ui`) and standalone HTML audit report favicons.
+- Added `Changelog` and `Security` project URLs and PEP 639 license metadata in `pyproject.toml`.
+
 ## [1.0.0] - 2026-11-26
 
 Initial public release of `notaffected`.

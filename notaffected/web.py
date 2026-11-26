@@ -511,7 +511,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="notaffected-token" content="__NOTAFFECTED_TOKEN__" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2318181b'/><path d='M9 17l5 5 9-11' stroke='%23f08a59' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2309090b' stroke='%2332323a' stroke-width='1.5'/><path d='M10 9H7v14h3M22 9h3v14h-3' stroke='%23e4e4e7' stroke-width='2.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/><path d='M11.5 16.5l3.2 3.2 6-6.8' stroke='%2322c55e' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
   <title>notaffected — Vulnerability Reachability &amp; OpenVEX Dashboard</title>
   <style>
     :root, [data-theme="dark"] {
@@ -1390,16 +1390,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <header>
     <div class="brand">
       <div class="brand-logo" aria-hidden="true">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f08a59" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-          <path d="m9 12 2 2 4-4"/>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M7.5 6H5v12h2.5M16.5 6H19v12h-2.5" stroke="currentColor" stroke-width="2.1"/>
+          <path d="M8.8 12.4 11.2 14.8 15.6 9.6" stroke="#22c55e" stroke-width="2.3"/>
         </svg>
       </div>
       <div class="brand-title">
         <h1>notaffected</h1>
         <span class="brand-sub">Reachability &amp; OpenVEX</span>
       </div>
-      <span class="pill accent" id="verPill">v1.0.0</span>
+      <span class="pill accent" id="verPill">v1.0.1</span>
       <span class="pill" id="dockerCountPill">Docker Targets: ...</span>
       <span class="pill" id="aiStatusPill">AI: Checking...</span>
     </div>
@@ -1906,7 +1906,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const data = await res.json();
         const customCount = Number(data.custom_rules_count || 0);
         document.getElementById("verPill").textContent =
-          "v" + (data.version || "1.0.0") + (customCount > 0 ? ` · ${customCount} custom rule${customCount === 1 ? "" : "s"}` : "");
+          "v" + (data.version || "1.0.1") + (customCount > 0 ? ` · ${customCount} custom rule${customCount === 1 ? "" : "s"}` : "");
         const count = (data.docker_containers || []).length;
         const dockerPill = document.getElementById("dockerCountPill");
         dockerPill.innerHTML = count > 0

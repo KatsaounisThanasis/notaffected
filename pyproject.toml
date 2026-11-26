@@ -8,7 +8,8 @@ dynamic = ["version"]
 description = "Deterministically prove whether CVEs actually affect Linux & Windows Server hosts and emit OpenVEX v0.2.0."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Thanos Katsaounis" }]
 keywords = [
     "security", "cve", "vex", "openvex", "vulnerability-management",
@@ -19,7 +20,6 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: System Administrators",
     "Intended Audience :: Information Technology",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -37,6 +37,8 @@ dependencies = [
 Homepage = "https://github.com/KatsaounisThanasis/notaffected"
 Repository = "https://github.com/KatsaounisThanasis/notaffected"
 Issues = "https://github.com/KatsaounisThanasis/notaffected/issues"
+Changelog = "https://github.com/KatsaounisThanasis/notaffected/blob/main/CHANGELOG.md"
+Security = "https://github.com/KatsaounisThanasis/notaffected/blob/main/SECURITY.md"
 
 [project.scripts]
 notaffected = "notaffected.cli:main"

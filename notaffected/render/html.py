@@ -204,7 +204,7 @@ def build_html_report(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2309090b' stroke='%23f08a59' stroke-width='2'/%3E%3Ctext x='16' y='21' text-anchor='middle' fill='%23f08a59' font-family='monospace' font-weight='700' font-size='14'%3Ena%3C/text%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2309090b' stroke='%2332323a' stroke-width='1.5'/%3E%3Cpath d='M10 9H7v14h3M22 9h3v14h-3' stroke='%23e4e4e7' stroke-width='2.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M11.5 16.5l3.2 3.2 6-6.8' stroke='%2322c55e' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <title>notaffected - Exploitability &amp; OpenVEX Audit Report</title>
   <style>
     :root, [data-theme="dark"] {{
@@ -688,7 +688,7 @@ def build_html_report(
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark">na</span>
+      <span class="brand-mark" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M7.5 6H5v12h2.5M16.5 6H19v12h-2.5" stroke="currentColor" stroke-width="2.1"/><path d="M8.8 12.4 11.2 14.8 15.6 9.6" stroke="#22c55e" stroke-width="2.3"/></svg></span>
       <div>
         <h1>notaffected</h1>
         <div class="brand-sub">Deterministic Exploitability &amp; OpenVEX v0.2.0 Audit Report</div>
