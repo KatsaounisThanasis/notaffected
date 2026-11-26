@@ -1,4 +1,10 @@
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/KatsaounisThanasis/notaffected/main/docs/logo.png" width="96" alt="notaffected logo" />
+
 # notaffected
+
+**Prove whether CVEs actually affect your Linux & Windows Server hosts — with deterministic proof and OpenVEX v0.2.0.**
 
 [![CI](https://github.com/KatsaounisThanasis/notaffected/actions/workflows/ci.yml/badge.svg)](https://github.com/KatsaounisThanasis/notaffected/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/notaffected.svg)](https://pypi.org/project/notaffected/)
@@ -6,9 +12,15 @@
 [![OpenVEX v0.2.0](https://img.shields.io/badge/OpenVEX-v0.2.0-22c55e.svg)](https://openvex.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-slate.svg)](https://github.com/KatsaounisThanasis/notaffected/blob/main/LICENSE)
 
-**From 10,000 noisy CVE alerts down to the 3 that actually matter — with deterministic proof and OpenVEX output for all the rest.**
+[Quick Start](#quick-start) · [Architecture](#architecture) · [Security](https://github.com/KatsaounisThanasis/notaffected/blob/main/SECURITY.md) · [Changelog](https://github.com/KatsaounisThanasis/notaffected/blob/main/CHANGELOG.md)
 
-![notaffected Web Dashboard](https://raw.githubusercontent.com/KatsaounisThanasis/notaffected/main/docs/dashboard.png)
+<br/>
+
+<img src="https://raw.githubusercontent.com/KatsaounisThanasis/notaffected/main/docs/how-it-works.png" alt="notaffected — How It Works" width="100%" />
+
+</div>
+
+<br/>
 
 Every week dozens of new CVEs are published, and AI-assisted research is finding them faster than ever. Traditional vulnerability scanners (Trivy, Grype, Qualys, Nessus) only check package versions: *"You have package X at version Y, therefore you are vulnerable."* They do not know whether the vulnerable code path or service can actually be triggered on your machine. It is like a smoke alarm that goes off every time you make toast: eventually you either panic or mute it.
 
@@ -80,6 +92,9 @@ uv venv && uv pip install -e ".[dev]"
 notaffected ui --port 8484
 # Open http://127.0.0.1:8484 in your browser
 ```
+
+![notaffected Web Dashboard](https://raw.githubusercontent.com/KatsaounisThanasis/notaffected/main/docs/dashboard.png)
+
 From the Web Dashboard you can:
 - Auto-discover running Docker containers, load `inventory.yaml`, select a single custom Docker/SSH target, or inspect the simulated Linux + Windows Server fleet.
 - Run **Auto-Scan** (combines built-in rules + live OSV `/v1/querybatch` queries for a fixed watch list of 7 packages, keeping up to 6 OSV CVEs, + up to 4 CISA KEV actively exploited CVEs), check specific CVE IDs, or upload a **Trivy / Grype JSON report**.
