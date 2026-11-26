@@ -113,6 +113,28 @@ def _parse_single_rule(raw: Any, origin_label: str) -> CheckSpec:
                 f"has unknown parameter(s) {unknown_keys}; allowed: {sorted(allowed_keys)}"
             )
 
+        for p_key, p_val in params.items():
+            if p_key in ("release_fixes", "track_fixes"):
+                if not isinstance(p_val, dict) or not all(
+                    isinstance(k, str) and k.strip() and isinstance(v, str) and v.strip()
+                    for k, v in p_val.items()
+                ):
+                    raise ValueError(
+                        f"{origin_label} ({cve_raw}): precondition #{idx} ({probe_name}) "
+                        f"parameter {p_key!r} must be a mapping of non-empty strings"
+                    )
+            elif p_key == "negate":
+                if not isinstance(p_val, bool):
+                    raise ValueError(
+                        f"{origin_label} ({cve_raw}): precondition #{idx} ({probe_name}) "
+                        f"parameter 'negate' must be a boolean, got {type(p_val).__name__}"
+                    )
+            elif p_val is not None and not isinstance(p_val, (str, int, float, bool)):
+                raise ValueError(
+                    f"{origin_label} ({cve_raw}): precondition #{idx} ({probe_name}) "
+                    f"parameter {p_key!r} must be a scalar value, got {type(p_val).__name__}"
+                )
+
         just_raw = item.get("justification_if_not_met")
         if just_raw is None or str(just_raw).strip() == "":
             justification = PROBE_DEFAULT_JUSTIFICATION[probe_name]

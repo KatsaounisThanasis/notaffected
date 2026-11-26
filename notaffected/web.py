@@ -214,11 +214,12 @@ def apply_host_mitigation(
     except (ValueError, TypeError):
         mit_idx = -1
 
-    is_known_custom = bool(custom_rules and cve_id in custom_rules)
+    norm_custom_rules = {k.strip().upper(): v for k, v in (custom_rules or {}).items()}
+    is_known_custom = cve_id in norm_custom_rules
     if not host or (not _CVE_TOKEN_RE.match(cve_id) and not is_known_custom) or mit_idx < 0:
         return {"ok": False, "error": "Invalid host, CVE ID, or mitigation index"}
 
-    spec = resolve_check_spec(cve_id, use_llm=False, custom_rules=custom_rules)
+    spec = resolve_check_spec(cve_id, use_llm=False, custom_rules=norm_custom_rules)
     if mit_idx >= len(spec.mitigation):
         return {"ok": False, "error": f"Mitigation index {mit_idx} out of range for {cve_id}"}
 
@@ -1903,7 +1904,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         const res = await fetch("/api/targets");
         const data = await res.json();
-        document.getElementById("verPill").textContent = "v" + (data.version || "1.0.0");
+        const customCount = Number(data.custom_rules_count || 0);
+        document.getElementById("verPill").textContent =
+          "v" + (data.version || "1.0.0") + (customCount > 0 ? ` · ${customCount} custom rule${customCount === 1 ? "" : "s"}` : "");
         const count = (data.docker_containers || []).length;
         const dockerPill = document.getElementById("dockerCountPill");
         dockerPill.innerHTML = count > 0
@@ -2254,6 +2257,7 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(raw)
 
@@ -2262,6 +2266,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(raw)
 
@@ -2396,7 +2403,9 @@ def run_web_server(
     check_bind_address(host, allow_remote)
     is_remote = host.strip().lower() not in ("127.0.0.1", "::1", "localhost")
     DashboardRequestHandler.remote_mode = is_remote
-    DashboardRequestHandler.custom_rules = dict(custom_rules or {})
+    DashboardRequestHandler.custom_rules = {
+        k.strip().upper(): v for k, v in (custom_rules or {}).items()
+    }
     DashboardRequestHandler.request_token = (
         (os.environ.get("NOTAFFECTED_REMOTE_TOKEN") or "").strip()
         if is_remote

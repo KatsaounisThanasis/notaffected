@@ -21,7 +21,7 @@ from notaffected.probes.runner import (
 
 
 def load_demo_fleet() -> list[HostRunner]:
-    """Return a realistic 3-host simulated fleet (laptop, exposed server, patched DB)
+    """Return a realistic 5-host simulated mixed fleet (Linux + Windows Server)
     so users can test multi-host verdicts without configuring SSH targets.
     """
     dpkg_src_cmd = (
@@ -223,10 +223,16 @@ def load_runners(
     runners: list[HostRunner] = []
 
     if inventory_path is not None:
-        raw = inventory_path.read_text(encoding="utf-8")
+        try:
+            raw = inventory_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(f"Could not read inventory file '{inventory_path}': {exc}") from exc
+        is_yaml_file = inventory_path.suffix.lower() in (".yaml", ".yml")
         try:
             parsed = yaml.safe_load(raw)
-        except Exception:
+        except yaml.YAMLError as exc:
+            if is_yaml_file or raw.lstrip().startswith("hosts:"):
+                raise ValueError(f"Invalid YAML in inventory file '{inventory_path}': {exc}") from exc
             parsed = None
 
         if isinstance(parsed, dict) and isinstance(parsed.get("hosts"), list):

@@ -113,6 +113,18 @@ preconditions:
             "cve_id: CVE-2026-1\nsummary: x\npreconditions:\n  - probe: process_running\n    params: {process: nginx}\n    justification_if_not_met: made_up_reason\n",
             "justification_if_not_met",
         ),
+        (
+            "cve_id: CVE-2026-1\nsummary: x\npreconditions:\n  - probe: package_installed_vulnerable\n    params: {package: [redis-server, redis]}\n",
+            "must be a scalar value",
+        ),
+        (
+            "cve_id: CVE-2026-1\nsummary: x\npreconditions:\n  - probe: package_installed_vulnerable\n    params: {package: openssl, release_fixes: [1.0]}\n",
+            "must be a mapping of non-empty strings",
+        ),
+        (
+            "cve_id: CVE-2026-1\nsummary: x\npreconditions:\n  - probe: config_contains\n    params: {path: /etc/ssh/sshd_config, pattern: foo, negate: 'yes'}\n",
+            "must be a boolean",
+        ),
     ],
 )
 def test_load_custom_rules_rejects_invalid_schema(tmp_path: Path, yaml_body: str, err_match: str) -> None:
@@ -134,6 +146,15 @@ def test_cli_rules_flag_e2e_and_error_exit(tmp_path: Path) -> None:
     assert main(["spec", "CVE-2026-40123", "--rules", str(tmp_path / "missing.yaml")]) == 2
     assert main(["check", "CVE-2026-40123", "--demo-fleet", "--rules", str(tmp_path / "missing.yaml")]) == 2
     assert main(["ui", "--rules", str(tmp_path / "missing.yaml")]) == 2
+    # Missing/malformed scanner report and inventory fail fast with exit code 2 (no traceback)
+    assert main(["filter", str(tmp_path / "missing-scan.json"), "--demo-fleet", "--offline"]) == 2
+    bad_json = tmp_path / "bad.json"
+    bad_json.write_text("{broken", encoding="utf-8")
+    assert main(["filter", str(bad_json), "--demo-fleet", "--offline"]) == 2
+    assert main(["scan", "-i", str(tmp_path / "missing-inv.yaml"), "--offline"]) == 2
+    bad_inv = tmp_path / "bad-inv.yaml"
+    bad_inv.write_text("hosts:\n  - name: [unclosed\n", encoding="utf-8")
+    assert main(["scan", "-i", str(bad_inv), "--offline"]) == 2
 
 
 def test_web_dashboard_custom_rules_integration() -> None:
@@ -183,6 +204,8 @@ def test_rpmvercmp_and_evr_edge_cases() -> None:
     assert _rpm_evr_lt("8.7p1-38.el9_4.1", "0:8.7p1-38.el9_4.4") is True
     # Missing installed epoch vs non-zero fixed epoch -> None (safe UNKNOWN)
     assert _rpm_evr_lt("8.7p1-38.el9_4.1", "1:8.7p1-38.el9_4.4") is None
+    # Non-zero installed epoch vs missing fixed epoch -> None (symmetric fail-closed UNKNOWN)
+    assert _rpm_evr_lt("1:8.7p1-38.el9_4.1", "8.7p1-38.el9_4.4") is None
     # Cross-distro Ubuntu/Debian/Alpine fix strings are refused on RPM
     assert _rpm_evr_lt("0:8.7p1-38.el9", "1:9.6p1-3ubuntu13.3") is None
     assert _rpm_evr_lt("0:3.0.7-24.el9", "3.0.11-1~deb12u2") is None
@@ -281,6 +304,54 @@ def test_firewalld_fallback_probe() -> None:
     zone_accept = zone_ssh_only.replace("target: default", "target: ACCEPT")
     assert run_probe(pre_631, _fwd_runner(zone_accept)).status == ProbeStatus.MET
 
+    # Multi-zone (--list-all-zones): active trusted zone with ACCEPT or open port overrides closed default zone
+    multi_zones_open = (
+        "public (default, active)\n"
+        "  target: default\n"
+        "  services: ssh\n"
+        "  ports:\n"
+        "  protocols:\n"
+        "  forward-ports:\n"
+        "  rich rules:\n"
+        "\n"
+        "trusted (active)\n"
+        "  target: ACCEPT\n"
+        "  services:\n"
+        "  ports:\n"
+    )
+    multi_runner = MockRunner(
+        "rhel-multi",
+        {
+            ("firewall-cmd", "--state"): CommandResult(0, "running\n", ""),
+            ("firewall-cmd", "--list-all-zones"): CommandResult(0, multi_zones_open, ""),
+            ("ip", "-o", "link", "show", "docker0"): CommandResult(1, "", ""),
+        },
+    )
+    assert run_probe(pre_631, multi_runner).status == ProbeStatus.MET
+
+    # Inactive trusted zone is ignored; multi-line forward-ports on active zone fails closed UNKNOWN
+    multi_zones_fwd = (
+        "public (default, active)\n"
+        "  target: default\n"
+        "  services: ssh\n"
+        "  ports:\n"
+        "  forward-ports:\n"
+        "\tport=631:proto=udp:toport=631:toaddr=10.0.0.5\n"
+        "  rich rules:\n"
+        "\n"
+        "trusted\n"
+        "  target: ACCEPT\n"
+    )
+    fwd_multi_runner = MockRunner(
+        "rhel-fwdport",
+        {
+            ("firewall-cmd", "--state"): CommandResult(0, "running\n", ""),
+            ("firewall-cmd", "--list-all-zones"): CommandResult(0, multi_zones_fwd, ""),
+            ("ip", "-o", "link", "show", "docker0"): CommandResult(1, "", ""),
+        },
+    )
+    assert run_probe(pre_631, fwd_multi_runner).status == ProbeStatus.UNKNOWN
+
 
 def test_nftables_fallback_probe() -> None:
     nft_drop = (
@@ -325,6 +396,20 @@ def test_nftables_fallback_probe() -> None:
     # Policy accept -> MET
     nft_open = nft_drop.replace("policy drop;", "policy accept;")
     assert run_probe(pre_6379, _nft(nft_open)).status == ProbeStatus.MET
+
+    # IPv4-only `table ip` drop leaves IPv6 unfiltered -> fail-closed UNKNOWN
+    nft_ipv4_only = nft_drop.replace("table inet filter", "table ip filter")
+    assert run_probe(pre_6379, _nft(nft_ipv4_only)).status == ProbeStatus.UNKNOWN
+
+    # Both `table ip` and `table ip6` drop -> NOT_MET
+    nft_dual_stack = nft_ipv4_only + "\n" + nft_drop.replace("table inet filter", "table ip6 filter")
+    assert run_probe(pre_6379, _nft(nft_dual_stack)).status == ProbeStatus.NOT_MET
+
+    # Compound ICMP + TCP accept rule must NOT be skipped as ICMP-only -> UNKNOWN (broad accept)
+    nft_icmp_tcp = nft_drop.replace(
+        "tcp dport { 22, 443 } accept", "meta l4proto { icmp, tcp } accept"
+    )
+    assert run_probe(pre_6379, _nft(nft_icmp_tcp)).status == ProbeStatus.UNKNOWN
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from rich.console import Console
@@ -259,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "spec":
         try:
             custom_rules = load_custom_rules(args.rules_paths)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
             return 2
         spec = resolve_check_spec(
@@ -288,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "ui":
         try:
             custom_rules = load_custom_rules(args.rules_paths)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
             return 2
         check_bind_address(args.bind, args.allow_remote)
@@ -321,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
                 k8s_targets=args.k8s_targets,
                 inventory_path=args.inventory,
             )
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
             return 2
 
@@ -366,7 +367,14 @@ def main(argv: list[str] | None = None) -> int:
             for cve in args.cves
         ]
     elif args.command == "filter":
-        findings = parse_scanner_json(args.scan_file)
+        try:
+            findings = parse_scanner_json(args.scan_file)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            console.print(
+                f"[bold red]Error:[/bold red] Could not parse scanner report "
+                f"'{escape(str(args.scan_file))}': {escape(str(exc))}"
+            )
+            return 2
         non_builtin = [
             f.cve_id
             for f in findings

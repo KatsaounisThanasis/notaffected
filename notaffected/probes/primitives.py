@@ -1,4 +1,4 @@
-"""Closed set of 9 read-only deterministic probe primitives.
+"""Closed set of 12 read-only deterministic probe primitives.
 
 Every probe returns a ProbeResult with status in {MET, NOT_MET, UNKNOWN} and
 a concrete evidence string containing the command output snippet.
@@ -402,8 +402,8 @@ def _rpm_evr_lt(installed: str, fixed: str) -> bool | None:
     if inst is None or fix is None:
         return None
     inst_ep, inst_has_ep, inst_ver, inst_rel = inst
-    fix_ep, _, fix_ver, fix_rel = fix
-    if not inst_has_ep and fix_ep != 0:
+    fix_ep, fix_has_ep, fix_ver, fix_rel = fix
+    if (not inst_has_ep and fix_ep != 0) or (not fix_has_ep and inst_ep != 0):
         return None
     if inst_ep != fix_ep:
         return inst_ep < fix_ep
@@ -1160,18 +1160,23 @@ def _try_firewalld_probe(
     if state_res.returncode != 0 or "running" not in state_res.stdout.lower():
         return None
 
-    cmd_str = "firewall-cmd --list-all"
-    list_res = runner.run(["firewall-cmd", "--list-all"])
+    cmd_str = "firewall-cmd --list-all-zones"
+    list_res = runner.run(["firewall-cmd", "--list-all-zones"])
+    used_all_zones = True
     if list_res.transport_error or list_res.returncode != 0 or not list_res.stdout.strip():
-        return ProbeResult(
-            precondition=pre,
-            status=ProbeStatus.UNKNOWN,
-            evidence=(
-                "firewalld is running, but `firewall-cmd --list-all` failed: "
-                f"{list_res.stderr.strip() or f'exit {list_res.returncode}'}"
-            ),
-            command=cmd_str,
-        )
+        used_all_zones = False
+        cmd_str = "firewall-cmd --list-all"
+        list_res = runner.run(["firewall-cmd", "--list-all"])
+        if list_res.transport_error or list_res.returncode != 0 or not list_res.stdout.strip():
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.UNKNOWN,
+                evidence=(
+                    "firewalld is running, but `firewall-cmd --list-all-zones` / `--list-all` failed: "
+                    f"{list_res.stderr.strip() or f'exit {list_res.returncode}'}"
+                ),
+                command=cmd_str,
+            )
 
     def _unknown(why: str) -> ProbeResult:
         return ProbeResult(precondition=pre, status=ProbeStatus.UNKNOWN, evidence=why, command=cmd_str)
@@ -1184,124 +1189,170 @@ def _try_firewalld_probe(
             return _unknown(f"{why}, but Docker is present and its published ports bypass firewalld")
         return ProbeResult(precondition=pre, status=ProbeStatus.NOT_MET, evidence=why, command=cmd_str)
 
-    target = ""
-    services: list[str] = []
-    ports: list[str] = []
-    protocols: list[str] = []
-    forward_ports: list[str] = []
-    rich_rules: list[str] = []
-    in_rich = False
+    # Parse one or more zone blocks (handling multi-line forward-ports and rich rules).
+    zones: list[dict[str, object]] = []
+    cur: dict[str, object] | None = None
+    multiline_section: str | None = None
+    _attr_re = re.compile(r"^[a-z][a-z -]*:")
+
     for raw_line in list_res.stdout.splitlines():
-        stripped = raw_line.strip()
-        if not stripped:
+        if not raw_line.strip():
             continue
-        if in_rich:
-            if stripped.startswith("rule ") or not re.match(r"^[a-z-]+:", stripped):
-                rich_rules.append(stripped)
+        if not raw_line[0].isspace():
+            header = raw_line.strip()
+            zone_name = header.split()[0]
+            is_active = "(active)" in header or ", active)" in header or "(active," in header
+            cur = {
+                "name": zone_name,
+                "active": is_active,
+                "target": "",
+                "services": [],
+                "ports": [],
+                "protocols": [],
+                "forward_ports": [],
+                "rich_rules": [],
+            }
+            zones.append(cur)
+            multiline_section = None
+            continue
+        if cur is None:
+            continue
+        stripped = raw_line.strip()
+        if multiline_section == "rich":
+            if stripped.startswith("rule ") or not _attr_re.match(stripped):
+                cur["rich_rules"].append(stripped)  # type: ignore[union-attr]
                 continue
-            in_rich = False
+            multiline_section = None
+        elif multiline_section == "forward-ports":
+            if stripped.startswith("port=") or not _attr_re.match(stripped):
+                cur["forward_ports"].append(stripped)  # type: ignore[union-attr]
+                continue
+            multiline_section = None
+
         if stripped.startswith("target:"):
-            target = stripped.split(":", 1)[1].strip()
+            cur["target"] = stripped.split(":", 1)[1].strip()
         elif stripped.startswith("services:"):
-            services = [tok for tok in stripped.split(":", 1)[1].split() if tok]
+            cur["services"] = [tok for tok in stripped.split(":", 1)[1].split() if tok]
         elif stripped.startswith("ports:"):
-            ports = [tok for tok in stripped.split(":", 1)[1].split() if tok]
+            cur["ports"] = [tok for tok in stripped.split(":", 1)[1].split() if tok]
         elif stripped.startswith("protocols:"):
-            protocols = [tok for tok in stripped.split(":", 1)[1].split() if tok]
+            cur["protocols"] = [tok for tok in stripped.split(":", 1)[1].split() if tok]
         elif stripped.startswith("forward-ports:"):
             val = stripped.split(":", 1)[1].strip()
             if val:
-                forward_ports.append(val)
+                cur["forward_ports"].append(val)  # type: ignore[union-attr]
+            multiline_section = "forward-ports"
         elif stripped.startswith("rich rules:"):
             val = stripped.split(":", 1)[1].strip()
             if val:
-                rich_rules.append(val)
-            in_rich = True
+                cur["rich_rules"].append(val)  # type: ignore[union-attr]
+            multiline_section = "rich"
 
-    if target.upper() == "ACCEPT":
-        return ProbeResult(
-            precondition=pre,
-            status=ProbeStatus.MET,
-            evidence="firewalld active zone has target: ACCEPT (incoming traffic allowed)",
-            command=cmd_str,
-        )
-    if target.lower() not in ("default", "drop", "%%reject%%", "reject"):
-        return _unknown(f"firewalld active zone has unrecognized target {target!r}")
+    active_zones = [z for z in zones if z["active"]] if used_all_zones else zones
+    if not active_zones:
+        return _unknown("firewalld is running, but no active zones could be parsed")
 
-    if port_raw.lower() != "any":
-        if not port_raw.isdigit():
-            return _unknown(f"Invalid port parameter {port_raw!r}")
-        port = int(port_raw)
-        for token in ports:
-            if "/" not in token:
-                continue
-            p_spec, p_proto = token.split("/", 1)
-            if p_proto.lower() != proto:
-                continue
-            m_range = re.fullmatch(r"(\d+)-(\d+)", p_spec)
-            if (p_spec.isdigit() and int(p_spec) == port) or (
-                m_range and int(m_range.group(1)) <= port <= int(m_range.group(2))
-            ):
-                return ProbeResult(
-                    precondition=pre,
-                    status=ProbeStatus.MET,
-                    evidence=f"firewalld active zone explicitly allows port {token}",
-                    command=cmd_str,
-                )
-        undecided: list[str] = []
-        for svc in services:
-            mapped = _FIREWALLD_SERVICE_PORTS.get(svc.lower())
-            if mapped is None:
-                undecided.append(f"service '{svc}'")
-                continue
-            if (port, proto) in mapped:
-                return ProbeResult(
-                    precondition=pre,
-                    status=ProbeStatus.MET,
-                    evidence=f"firewalld active zone allows service '{svc}' ({port}/{proto})",
-                    command=cmd_str,
-                )
-        if rich_rules:
-            undecided.append(f"{len(rich_rules)} rich rule(s)")
-        if protocols:
-            undecided.append(f"protocols ({', '.join(protocols[:3])})")
-        if forward_ports:
-            undecided.append("forward-ports")
-        if undecided:
-            return _unknown(
-                f"firewalld rules that may allow {port}/{proto} cannot be resolved: {', '.join(undecided[:3])}"
+    if port_raw.lower() != "any" and not port_raw.isdigit():
+        return _unknown(f"Invalid port parameter {port_raw!r}")
+    port = int(port_raw) if port_raw.isdigit() else None
+
+    undecided: list[str] = []
+    checked_summary: list[str] = []
+    for zone in active_zones:
+        zname = str(zone["name"])
+        target = str(zone["target"])
+        services: list[str] = zone["services"]  # type: ignore[assignment]
+        ports: list[str] = zone["ports"]  # type: ignore[assignment]
+        protocols: list[str] = zone["protocols"]  # type: ignore[assignment]
+        forward_ports: list[str] = zone["forward_ports"]  # type: ignore[assignment]
+        rich_rules: list[str] = zone["rich_rules"]  # type: ignore[assignment]
+        checked_summary.append(f"{zname}(target={target})")
+
+        if target.upper() == "ACCEPT":
+            return ProbeResult(
+                precondition=pre,
+                status=ProbeStatus.MET,
+                evidence=f"firewalld active zone '{zname}' has target: ACCEPT (incoming traffic allowed)",
+                command=cmd_str,
             )
-        return _not_met(
-            f"firewalld is running (target: {target}) with no open port or service matching {port}/{proto}"
-        )
+        if target.lower() not in ("default", "drop", "%%reject%%", "reject"):
+            undecided.append(f"zone '{zname}' unrecognized target {target!r}")
+            continue
 
-    # port_raw == "any"
-    matching_ports = [p for p in ports if p.lower().endswith(f"/{proto}")]
-    if matching_ports:
-        return ProbeResult(
-            precondition=pre,
-            status=ProbeStatus.MET,
-            evidence=f"firewalld active zone allows incoming {proto} port(s): {', '.join(matching_ports[:4])}",
-            command=cmd_str,
-        )
-    matching_svcs = [
-        svc
-        for svc in services
-        if any(sp_proto == proto for _, sp_proto in _FIREWALLD_SERVICE_PORTS.get(svc.lower(), ()))
-    ]
-    if matching_svcs:
-        return ProbeResult(
-            precondition=pre,
-            status=ProbeStatus.MET,
-            evidence=f"firewalld active zone allows incoming {proto} service(s): {', '.join(matching_svcs[:4])}",
-            command=cmd_str,
-        )
-    unknown_svcs = [svc for svc in services if svc.lower() not in _FIREWALLD_SERVICE_PORTS]
-    if unknown_svcs or rich_rules or protocols or forward_ports:
+        if port is not None:
+            for token in ports:
+                if "/" not in token:
+                    continue
+                p_spec, p_proto = token.split("/", 1)
+                if p_proto.lower() != proto:
+                    continue
+                m_range = re.fullmatch(r"(\d+)-(\d+)", p_spec)
+                if (p_spec.isdigit() and int(p_spec) == port) or (
+                    m_range and int(m_range.group(1)) <= port <= int(m_range.group(2))
+                ):
+                    return ProbeResult(
+                        precondition=pre,
+                        status=ProbeStatus.MET,
+                        evidence=f"firewalld active zone '{zname}' explicitly allows port {token}",
+                        command=cmd_str,
+                    )
+            for svc in services:
+                mapped = _FIREWALLD_SERVICE_PORTS.get(svc.lower())
+                if mapped is None:
+                    undecided.append(f"zone '{zname}' service '{svc}'")
+                    continue
+                if (port, proto) in mapped:
+                    return ProbeResult(
+                        precondition=pre,
+                        status=ProbeStatus.MET,
+                        evidence=f"firewalld active zone '{zname}' allows service '{svc}' ({port}/{proto})",
+                        command=cmd_str,
+                    )
+            if rich_rules:
+                undecided.append(f"zone '{zname}' {len(rich_rules)} rich rule(s)")
+            if protocols:
+                undecided.append(f"zone '{zname}' protocols ({', '.join(protocols[:3])})")
+            if forward_ports:
+                undecided.append(f"zone '{zname}' forward-ports")
+        else:
+            matching_ports = [p for p in ports if p.lower().endswith(f"/{proto}")]
+            if matching_ports:
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.MET,
+                    evidence=(
+                        f"firewalld active zone '{zname}' allows incoming {proto} port(s): "
+                        f"{', '.join(matching_ports[:4])}"
+                    ),
+                    command=cmd_str,
+                )
+            matching_svcs = [
+                svc
+                for svc in services
+                if any(sp_proto == proto for _, sp_proto in _FIREWALLD_SERVICE_PORTS.get(svc.lower(), ()))
+            ]
+            if matching_svcs:
+                return ProbeResult(
+                    precondition=pre,
+                    status=ProbeStatus.MET,
+                    evidence=(
+                        f"firewalld active zone '{zname}' allows incoming {proto} service(s): "
+                        f"{', '.join(matching_svcs[:4])}"
+                    ),
+                    command=cmd_str,
+                )
+            unknown_svcs = [svc for svc in services if svc.lower() not in _FIREWALLD_SERVICE_PORTS]
+            if unknown_svcs or rich_rules or protocols or forward_ports:
+                undecided.append(f"zone '{zname}' custom services/protocols/rich-rules/forward-ports")
+
+    if undecided:
         return _unknown(
-            "firewalld has custom services, protocols, or rich rules that cannot be resolved statically"
+            f"firewalld rules that may allow {port_raw}/{proto} cannot be resolved: {', '.join(undecided[:3])}"
         )
-    return _not_met(f"firewalld is running (target: {target}) with no incoming {proto} ports or services allowed")
+    return _not_met(
+        f"firewalld is running across active zone(s) {', '.join(checked_summary[:4])} "
+        f"with no open port or service matching {port_raw}/{proto}"
+    )
 
 
 def _nft_dport_matches(spec: str, port: int) -> bool | None:
@@ -1330,35 +1381,76 @@ def _nft_dport_matches(spec: str, port: int) -> bool | None:
     return None if saw_unknown else False
 
 
-def _extract_nft_input_chains(ruleset: str) -> list[tuple[str, list[str]]]:
-    """Extract `(policy, rule_lines)` for every `type filter hook input` chain in `nft list ruleset`."""
-    chains: list[tuple[str, list[str]]] = []
+_NFT_TABLE_FAMILIES = frozenset({"inet", "ip", "ip6", "arp", "bridge", "netdev"})
+
+
+def _extract_nft_input_chains(ruleset: str) -> list[tuple[str, str, list[str]]]:
+    """Extract `(family, policy, rule_lines)` for every `type filter hook input` chain in `nft list ruleset`."""
+    chains: list[tuple[str, str, list[str]]] = []
     lines = ruleset.splitlines()
     i = 0
+    current_family = ""
+    table_depth = 0
     while i < len(lines):
         line = lines[i].strip()
+        if table_depth == 0:
+            m_tbl = re.match(r"^table\s+(\S+)(?:\s+\S+)?\s*\{", line)
+            if m_tbl:
+                first_tok = m_tbl.group(1)
+                current_family = first_tok if first_tok in _NFT_TABLE_FAMILIES else "ip"
+                table_depth = line.count("{") - line.count("}")
+                i += 1
+                continue
+            i += 1
+            continue
+
         if line.startswith("chain ") and "{" in line:
-            depth = line.count("{") - line.count("}")
+            chain_depth = line.count("{") - line.count("}")
+            table_depth += chain_depth
             body: list[str] = []
             i += 1
-            while i < len(lines) and depth > 0:
+            while i < len(lines) and chain_depth > 0:
                 cur = lines[i]
-                depth += cur.count("{") - cur.count("}")
-                if depth > 0:
+                delta = cur.count("{") - cur.count("}")
+                chain_depth += delta
+                table_depth += delta
+                if chain_depth > 0:
                     body.append(cur.strip())
                 i += 1
             hook_line = next(
-                (b for b in body if re.search(r"\bhook\s+input\b", b)),
+                (
+                    b
+                    for b in body
+                    if re.search(r"\btype\s+filter\b", b) and re.search(r"\bhook\s+input\b", b)
+                ),
                 None,
             )
             if hook_line:
                 m_pol = re.search(r"\bpolicy\s+(accept|drop|reject)\b", hook_line)
                 policy = m_pol.group(1) if m_pol else "accept"
                 rules = [b for b in body if b is not hook_line]
-                chains.append((policy, rules))
+                chains.append((current_family, policy, rules))
             continue
+
+        table_depth += line.count("{") - line.count("}")
+        if table_depth <= 0:
+            table_depth = 0
+            current_family = ""
         i += 1
     return chains
+
+
+def _is_icmp_only_nft_rule(rule: str) -> bool:
+    """Return True only when an nftables accept rule exclusively matches ICMP/ICMPv6."""
+    if not re.search(r"\b(?:icmp|icmpv6)\b", rule):
+        return False
+    if re.search(r"\b(?:tcp|udp|th|sctp|dccp|udplite)\b", rule):
+        return False
+    m_set = re.search(r"\bmeta\s+l4proto\s*\{([^}]*)\}", rule)
+    if m_set:
+        tokens = [t.strip().lower() for t in m_set.group(1).split(",") if t.strip()]
+        return bool(tokens) and all(t in ("icmp", "icmpv6") for t in tokens)
+    return True
 
 
 def _try_nftables_probe(
@@ -1380,7 +1472,7 @@ def _try_nftables_probe(
     if res.returncode != 0 or not res.stdout.strip():
         return None
 
-    chains = _extract_nft_input_chains(res.stdout)
+    chains = [c for c in _extract_nft_input_chains(res.stdout) if c[0] in ("inet", "ip", "ip6")]
     if not chains:
         return None
 
@@ -1395,7 +1487,7 @@ def _try_nftables_probe(
             return _unknown(f"{why}, but Docker is present and its published ports may bypass input filter rules")
         return ProbeResult(precondition=pre, status=ProbeStatus.NOT_MET, evidence=why, command=cmd_str)
 
-    deny_chains = [(pol, rules) for pol, rules in chains if pol in ("drop", "reject")]
+    deny_chains = [(fam, pol, rules) for fam, pol, rules in chains if pol in ("drop", "reject")]
     if not deny_chains:
         return ProbeResult(
             precondition=pre,
@@ -1409,7 +1501,7 @@ def _try_nftables_probe(
     port = int(port_raw) if port_raw.isdigit() else None
 
     undecided: list[str] = []
-    for _pol, rules in deny_chains:
+    for _fam, _pol, rules in deny_chains:
         for raw_rule in rules:
             rule = re.sub(r"\s*#.*$", "", raw_rule).strip().rstrip(";")
             if not rule:
@@ -1419,7 +1511,7 @@ def _try_nftables_probe(
                 continue
             if re.search(r"\bct\s+state\b.*\b(?:established|related)\b", rule) and "new" not in rule.split():
                 continue
-            if re.search(r"\b(?:icmp|icmpv6|meta\s+l4proto\s+(?:icmp|icmpv6))\b", rule):
+            if _is_icmp_only_nft_rule(rule):
                 continue
             if re.search(r"\b(?:jump|goto)\b", rule):
                 undecided.append(f"non-inline jump/goto ({rule[:48]})")
@@ -1467,8 +1559,17 @@ def _try_nftables_probe(
         return _unknown(
             f"nftables rules that may allow {port_raw}/{proto} cannot be resolved: {'; '.join(undecided[:3])}"
         )
+
+    deny_families = {fam for fam, _, _ in deny_chains}
+    covers_both = ("inet" in deny_families) or ("ip" in deny_families and "ip6" in deny_families)
+    if not covers_both:
+        return _unknown(
+            f"nftables only filters {', '.join(sorted(deny_families))} input traffic; "
+            "cannot prove the other IP family is blocked"
+        )
     return _not_met(
-        f"nftables input chain has policy drop/reject with no incoming accept rule for {port_raw}/{proto}"
+        f"nftables input chain ({', '.join(sorted(deny_families))}) has policy drop/reject "
+        f"with no incoming accept rule for {port_raw}/{proto}"
     )
 
 
