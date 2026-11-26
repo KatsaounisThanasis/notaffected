@@ -52,10 +52,10 @@ jobs:
           report = json.load(open("/tmp/demo.json"))
           counts = dict(collections.Counter(v["status"] for v in report["verdicts"]))
           print(counts)
-          # 5 demo hosts x 7 built-in CVEs; a change here must be explained, not just updated.
-          assert counts == {"not_affected": 31, "affected": 4}, counts
+          # 5 demo hosts x 25 built-in CVEs (7 Python + 18 bundled YAML); a change here must be explained.
+          assert counts == {"not_affected": 112, "affected": 4, "under_investigation": 9}, counts
           vex = json.load(open("/tmp/demo.vex.json"))
-          assert len(vex["statements"]) == 35, len(vex["statements"])
+          assert len(vex["statements"]) == 125, len(vex["statements"])
           jsonschema.validate(vex, json.load(open("fixtures/openvex_json_schema.json")))
           print("OpenVEX document is valid against the official v0.2.0 schema")
           EOF
