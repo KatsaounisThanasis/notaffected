@@ -4,7 +4,7 @@
 
 # notaffected
 
-**Prove whether CVEs actually affect your Linux & Windows Server hosts — with deterministic proof and OpenVEX v0.2.0.**
+**Prove whether CVEs actually affect your Linux & Windows Server hosts with deterministic proof and OpenVEX v0.2.0.**
 
 [![CI](https://github.com/KatsaounisThanasis/notaffected/actions/workflows/ci.yml/badge.svg)](https://github.com/KatsaounisThanasis/notaffected/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/notaffected.svg)](https://pypi.org/project/notaffected/)
