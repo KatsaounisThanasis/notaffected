@@ -1,0 +1,201 @@
+# Bundled Windows Server Curated Rules (verified against Microsoft Security Update Guide / Server 2022 20348.xxxx)
+rules:
+  - cve_id: CVE-2024-38077
+    summary: "Windows Remote Desktop Licensing Service ('MadLicense') pre-auth 0-click remote code execution"
+    severity: CRITICAL
+    os_family: windows
+    confidence: high
+    preconditions:
+      - probe: windows_build_vulnerable
+        params:
+          kb: KB5040437
+          fixed_build: "20348.2582"
+        description: "Windows Server build predates July 2024 patch (KB5040437 / build 20348.2582)"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: windows_service_active
+        params:
+          service: TermServLicensing
+        description: "Remote Desktop Licensing Service ('TermServLicensing') is running"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Stop-Service -Name TermServLicensing -Force; Set-Service -Name TermServLicensing -StartupType Disabled"
+      - "Install July 2024 Cumulative Update (KB5040437 or later)"
+    patch:
+      status: released
+      fixed_version: "KB5040437 (OS Build 20348.2582)"
+      advisory_url: "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2024-38077"
+
+  - cve_id: CVE-2023-21554
+    summary: "Microsoft Message Queuing ('QueueJumper') pre-auth TCP 1801 remote code execution"
+    severity: CRITICAL
+    os_family: windows
+    confidence: high
+    preconditions:
+      - probe: windows_build_vulnerable
+        params:
+          kb: KB5025230
+          fixed_build: "20348.1668"
+        description: "Windows Server build predates April 2023 patch (KB5025230 / build 20348.1668)"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: windows_service_active
+        params:
+          service: MSMQ
+        description: "Microsoft Message Queuing ('MSMQ') service is running"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Stop-Service -Name MSMQ -Force; Set-Service -Name MSMQ -StartupType Disabled"
+      - "Block inbound TCP port 1801 on Windows Firewall and install KB5025230 or later"
+    patch:
+      status: released
+      fixed_version: "KB5025230 (OS Build 20348.1668)"
+      advisory_url: "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2023-21554"
+
+  - cve_id: CVE-2024-30080
+    summary: "Microsoft Message Queuing (MSMQ) use-after-free pre-auth remote code execution"
+    severity: CRITICAL
+    os_family: windows
+    confidence: high
+    preconditions:
+      - probe: windows_build_vulnerable
+        params:
+          kb: KB5037782
+          fixed_build: "20348.2461"
+        description: "Windows Server build predates May 2024 patch (KB5037782 / build 20348.2461)"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: windows_service_active
+        params:
+          service: MSMQ
+        description: "Microsoft Message Queuing ('MSMQ') service is running"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Stop-Service -Name MSMQ -Force; Set-Service -Name MSMQ -StartupType Disabled"
+      - "Block inbound TCP port 1801 on Windows Firewall and install KB5037782 or later"
+    patch:
+      status: released
+      fixed_version: "KB5037782 (OS Build 20348.2461)"
+      advisory_url: "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2024-30080"
+
+  - cve_id: CVE-2024-49112
+    summary: "Windows Lightweight Directory Access Protocol ('LDAPNightmare') unauthenticated remote code execution"
+    severity: CRITICAL
+    os_family: windows
+    confidence: high
+    preconditions:
+      - probe: windows_build_vulnerable
+        params:
+          kb: KB5048654
+          fixed_build: "20348.2966"
+        description: "Windows Server build predates December 2024 patch (KB5048654 / build 20348.2966)"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: windows_service_active
+        params:
+          service: NTDS
+        description: "Active Directory Domain Services ('NTDS') is running on this host"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Install December 2024 Cumulative Update (KB5048654 or later) on Domain Controllers"
+      - "Block outbound CLDAP (UDP 389) from Domain Controllers to untrusted networks"
+    patch:
+      status: released
+      fixed_version: "KB5048654 (OS Build 20348.2966)"
+      advisory_url: "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2024-49112"
+
+  - cve_id: CVE-2024-49085
+    summary: "Windows Routing and Remote Access Service (RRAS) heap overflow remote code execution"
+    severity: HIGH
+    os_family: windows
+    confidence: high
+    preconditions:
+      - probe: windows_build_vulnerable
+        params:
+          kb: KB5048654
+          fixed_build: "20348.2966"
+        description: "Windows Server build predates December 2024 patch (KB5048654 / build 20348.2966)"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: windows_service_active
+        params:
+          service: RemoteAccess
+        description: "Routing and Remote Access ('RemoteAccess') service is running"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Stop-Service -Name RemoteAccess -Force; Set-Service -Name RemoteAccess -StartupType Disabled"
+      - "Install December 2024 Cumulative Update (KB5048654 or later)"
+    patch:
+      status: released
+      fixed_version: "KB5048654 (OS Build 20348.2966)"
+      advisory_url: "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2024-49085"
+
+  - cve_id: CVE-2024-30078
+    summary: "Windows Wi-Fi Driver unauthenticated adjacent-network remote code execution"
+    severity: CRITICAL
+    os_family: windows
+    confidence: high
+    preconditions:
+      - probe: windows_build_vulnerable
+        params:
+          kb: KB5039227
+          fixed_build: "20348.2527"
+        description: "Windows Server build predates June 2024 patch (KB5039227 / build 20348.2527)"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: windows_service_active
+        params:
+          service: WlanSvc
+        description: "WLAN AutoConfig ('WlanSvc') wireless service is running"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Stop-Service -Name WlanSvc -Force; Set-Service -Name WlanSvc -StartupType Disabled"
+      - "Install June 2024 Cumulative Update (KB5039227 or later)"
+    patch:
+      status: released
+      fixed_version: "KB5039227 (OS Build 20348.2527)"
+      advisory_url: "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2024-30078"
+
+  - cve_id: CVE-2026-21533
+    summary: "Windows Remote Desktop Services configuration key elevation of privilege (CISA KEV)"
+    severity: HIGH
+    os_family: windows
+    confidence: high
+    preconditions:
+      - probe: windows_build_vulnerable
+        params:
+          kb: KB5075906
+          fixed_build: "20348.4773"
+        description: "Windows Server build predates February 2026 patch (KB5075906 / build 20348.4773)"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: windows_service_active
+        params:
+          service: TermService
+        description: "Remote Desktop Services ('TermService') is running"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Stop-Service -Name TermService -Force; Set-Service -Name TermService -StartupType Disabled"
+      - "Install February 2026 Cumulative Update (KB5075906 or later)"
+    patch:
+      status: released
+      fixed_version: "KB5075906 (OS Build 20348.4773)"
+      advisory_url: "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2026-21533"
+
+  - cve_id: CVE-2026-41096
+    summary: "Windows DNS Client heap-based buffer overflow unauthenticated remote code execution"
+    severity: CRITICAL
+    os_family: windows
+    confidence: high
+    preconditions:
+      - probe: windows_build_vulnerable
+        params:
+          kb: KB5087424
+          fixed_build: "20348.5074"
+        description: "Windows Server build predates May 2026 patch (KB5087424 / build 20348.5074)"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: windows_service_active
+        params:
+          service: Dnscache
+        description: "Windows DNS Client ('Dnscache') service is running"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Install May 2026 Cumulative Update (KB5087424 or later)"
+      - "Restrict DNS resolvers to trusted internal forwarders via firewall policy"
+    patch:
+      status: released
+      fixed_version: "KB5087424 (OS Build 20348.5074)"
+      advisory_url: "https://msrc.microsoft.com/update-guide/vulnerability/CVE-2026-41096"

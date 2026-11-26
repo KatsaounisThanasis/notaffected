@@ -1,0 +1,199 @@
+# Bundled Linux Infrastructure Services Curated Rules (verified against OSV.dev & Red Hat Security Data)
+rules:
+  - cve_id: CVE-2025-49844
+    summary: "Redis ('RediShell') Lua interpreter use-after-free sandbox escape leading to remote code execution"
+    severity: CRITICAL
+    os_family: linux
+    confidence: high
+    preconditions:
+      - probe: package_installed_vulnerable
+        params:
+          package: redis-server
+          fixed_version: "5:7.0.15-1ubuntu0.24.04.2"
+          release_fixes:
+            "ubuntu:20.04": "5:5.0.7-2ubuntu0.1+esm4"
+            "ubuntu:24.04": "5:7.0.15-1ubuntu0.24.04.2"
+            "debian:12": "5:7.0.15-1~deb12u6"
+            "debian:13": "5:8.0.2-3+deb13u1"
+        description: "Package 'redis-server' is installed and vulnerable to CVE-2025-49844"
+        justification_if_not_met: component_not_present
+      - probe: process_running
+        params:
+          process: redis-server
+        description: "Redis server daemon ('redis-server') is running"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+      - probe: network_listener
+        params:
+          proto: tcp
+          port: 6379
+          scope: non_loopback
+        description: "Redis is listening on a non-loopback network interface (TCP 6379)"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+      - probe: firewall_allows_port
+        params:
+          port: "6379"
+          proto: tcp
+        description: "Host firewall allows incoming TCP traffic on port 6379"
+        justification_if_not_met: inline_mitigations_already_exist
+    mitigation:
+      - "sudo ufw deny 6379/tcp"
+      - "Bind Redis to 127.0.0.1 in /etc/redis/redis.conf and restrict EVAL/EVALSHA via Redis ACLs (-@scripting)"
+    patch:
+      status: released
+      fixed_version: "5:7.0.15-1ubuntu0.24.04.2"
+      advisory_url: "https://ubuntu.com/security/CVE-2025-49844"
+
+  - cve_id: CVE-2025-26465
+    summary: "OpenSSH client VerifyHostKeyDNS machine-in-the-middle server impersonation"
+    severity: HIGH
+    os_family: linux
+    confidence: high
+    preconditions:
+      - probe: package_installed_vulnerable
+        params:
+          package: openssh-client
+          fixed_version: "1:9.6p1-3ubuntu13.8"
+          release_fixes:
+            "ubuntu:20.04": "1:8.2p1-4ubuntu0.12"
+            "ubuntu:22.04": "1:8.9p1-3ubuntu0.11"
+            "ubuntu:24.04": "1:9.6p1-3ubuntu13.8"
+            "debian:12": "1:9.2p1-2+deb12u5"
+            "debian:13": "1:9.9p2-1"
+            "rhel:8": "0:8.0p1-26.el8_10"
+            "rhel:9": "0:8.7p1-45.el9"
+        description: "Package 'openssh-client' is installed and predates the CVE-2025-26465 fix"
+        justification_if_not_met: component_not_present
+      - probe: config_contains
+        params:
+          path: /etc/ssh/ssh_config
+          pattern: "^\\s*VerifyHostKeyDNS\\s+(yes|ask)\\b"
+          semantics: first
+          directive: VerifyHostKeyDNS
+        description: "Non-default option 'VerifyHostKeyDNS yes|ask' is enabled in /etc/ssh/ssh_config"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Set 'VerifyHostKeyDNS no' in /etc/ssh/ssh_config"
+      - "Upgrade openssh-client to a patched release"
+    patch:
+      status: released
+      fixed_version: "1:9.6p1-3ubuntu13.8"
+      advisory_url: "https://ubuntu.com/security/CVE-2025-26465"
+
+  - cve_id: CVE-2026-4480
+    summary: "Samba unauthenticated remote code execution via unquoted %J in custom print command"
+    severity: CRITICAL
+    os_family: linux
+    confidence: high
+    preconditions:
+      - probe: package_installed_vulnerable
+        params:
+          package: samba
+          fixed_version: "2:4.19.5+dfsg-4ubuntu9.6"
+          release_fixes:
+            "ubuntu:22.04": "2:4.15.13+dfsg-0ubuntu1.12"
+            "ubuntu:24.04": "2:4.19.5+dfsg-4ubuntu9.6"
+            "debian:12": "2:4.17.12+dfsg-0+deb12u4"
+            "debian:13": "2:4.22.8+dfsg-0+deb13u2"
+            "rhel:8": "0:4.19.4-16.el8_10"
+        description: "Package 'samba' is installed and predates the CVE-2026-4480 fix"
+        justification_if_not_met: component_not_present
+      - probe: process_running
+        params:
+          process: smbd
+        description: "Samba SMB daemon ('smbd') is running"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+      - probe: config_contains
+        params:
+          path: /etc/samba/smb.conf
+          pattern: "^\\s*print\\s+command\\s*=.*%J"
+        description: "Custom 'print command' using %J substitution is configured in /etc/samba/smb.conf"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Enclose %J in single quotes ('%J') or switch to 'printing = cups' in /etc/samba/smb.conf and reload smbd"
+      - "Upgrade samba to a patched release"
+    patch:
+      status: released
+      fixed_version: "2:4.19.5+dfsg-4ubuntu9.6"
+      advisory_url: "https://ubuntu.com/security/CVE-2026-4480"
+
+  - cve_id: CVE-2024-7347
+    summary: "NGINX ngx_http_mp4_module buffer over-read causing worker process crash (DoS)"
+    severity: MEDIUM
+    os_family: linux
+    confidence: high
+    preconditions:
+      - probe: package_installed_vulnerable
+        params:
+          package: nginx
+          fixed_version: "1.24.0-2ubuntu7.1"
+          release_fixes:
+            "ubuntu:20.04": "1.18.0-0ubuntu1.6"
+            "ubuntu:22.04": "1.18.0-6ubuntu14.5"
+            "ubuntu:24.04": "1.24.0-2ubuntu7.1"
+            "debian:12": "1.22.1-9+deb12u2"
+            "debian:13": "1.26.0-2"
+            "rhel:9": "2:1.20.1-22.el9_6.2"
+        description: "Package 'nginx' is installed and predates the CVE-2024-7347 fix"
+        justification_if_not_met: component_not_present
+      - probe: process_running
+        params:
+          process: nginx
+        description: "NGINX worker/master process is running"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+      - probe: config_contains
+        params:
+          path: /etc/nginx/nginx.conf
+          pattern: "^\\s*mp4\\s*;"
+        description: "The 'mp4;' directive (ngx_http_mp4_module) is enabled in /etc/nginx/nginx.conf"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Remove the 'mp4;' directive from NGINX configuration and reload nginx if MP4 streaming is unused"
+      - "Upgrade nginx to a patched release"
+    patch:
+      status: released
+      fixed_version: "1.24.0-2ubuntu7.1"
+      advisory_url: "https://ubuntu.com/security/CVE-2024-7347"
+
+  - cve_id: CVE-2024-27316
+    summary: "Apache HTTP Server mod_http2 CONTINUATION frame flood memory exhaustion DoS"
+    severity: HIGH
+    os_family: linux
+    confidence: high
+    preconditions:
+      - probe: package_installed_vulnerable
+        params:
+          package: apache2
+          fixed_version: "2.4.58-1ubuntu8.1"
+          release_fixes:
+            "ubuntu:20.04": "2.4.41-4ubuntu3.17"
+            "ubuntu:22.04": "2.4.52-1ubuntu4.9"
+            "ubuntu:24.04": "2.4.58-1ubuntu8.1"
+            "debian:12": "2.4.59-1~deb12u1"
+            "debian:13": "2.4.59-1"
+        description: "Package 'apache2' is installed and predates the CVE-2024-27316 fix"
+        justification_if_not_met: component_not_present
+      - probe: systemd_service_active
+        params:
+          service: apache2.service
+        description: "systemd unit 'apache2.service' is active"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+      - probe: network_listener
+        params:
+          proto: tcp
+          port: 443
+          scope: non_loopback
+        description: "Apache is listening on non-loopback HTTPS port 443"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+      - probe: config_contains
+        params:
+          path: /etc/apache2/apache2.conf
+          pattern: "^\\s*Protocols\\s+.*\\bh2c?\\b"
+        description: "HTTP/2 ('Protocols ... h2') is enabled in /etc/apache2/apache2.conf"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "Remove 'h2' / 'h2c' from the Protocols directive or disable mod_http2 (sudo a2dismod http2 && sudo systemctl reload apache2)"
+      - "Upgrade apache2 to a patched release"
+    patch:
+      status: released
+      fixed_version: "2.4.58-1ubuntu8.1"
+      advisory_url: "https://ubuntu.com/security/CVE-2024-27316"

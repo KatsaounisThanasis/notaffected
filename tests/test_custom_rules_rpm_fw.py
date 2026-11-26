@@ -179,6 +179,36 @@ def test_web_dashboard_custom_rules_integration() -> None:
     assert any(s["cve_id"] == "CVE-2026-40123" and s["source"] == "custom-yaml" for s in res["specs"])
 
 
+def test_bundled_yaml_rules_pack_strict_schema_and_count() -> None:
+    rules_root = Path(__file__).resolve().parent.parent / "notaffected" / "rules"
+    yaml_files = sorted(rules_root.rglob("*.yaml"))
+    assert len(yaml_files) >= 3
+    validated = load_custom_rules(yaml_files)
+    assert len(validated) == 18
+    assert len(BUILTIN_SPECS) == 25
+    for cid in validated:
+        assert cid in BUILTIN_SPECS
+        assert BUILTIN_SPECS[cid].source == "builtin"
+        assert BUILTIN_SPECS[cid].os_source == "curated"
+
+    # Spot-check OpenSSH VerifyHostKeyDNS MitM (CVE-2025-26465): default 'no' -> NOT_MET
+    ssh_spec = BUILTIN_SPECS["CVE-2025-26465"]
+    safe_ssh = MockRunner(
+        "ubuntu-safe",
+        {
+            ("cat", "/etc/ssh/ssh_config"): CommandResult(0, "Host *\n  VerifyHostKeyDNS no\n", ""),
+        },
+    )
+    cfg_pre = next(p for p in ssh_spec.preconditions if p.probe == "config_contains")
+    assert run_probe(cfg_pre, safe_ssh).status == ProbeStatus.NOT_MET
+
+    # Spot-check MadLicense (CVE-2024-38077): TermServLicensing Stopped -> NOT_MET
+    mad_spec = BUILTIN_SPECS["CVE-2024-38077"]
+    assert mad_spec.os_family == "windows"
+    svc_pre = next(p for p in mad_spec.preconditions if p.probe == "windows_service_active")
+    assert svc_pre.params["service"] == "TermServLicensing"
+
+
 # ---------------------------------------------------------------------------
 # 2. Native RPM EVR Comparison + RHEL/Rocky/Alma Release Matching
 # ---------------------------------------------------------------------------
@@ -410,6 +440,53 @@ def test_nftables_fallback_probe() -> None:
         "tcp dport { 22, 443 } accept", "meta l4proto { icmp, tcp } accept"
     )
     assert run_probe(pre_6379, _nft(nft_icmp_tcp)).status == ProbeStatus.UNKNOWN
+
+    # ct state with new/untracked must NOT be skipped as established-only
+    nft_ct_new = nft_drop.replace(
+        "ct state established,related accept", "ct state established,related,new tcp dport 6379 accept"
+    )
+    assert run_probe(pre_6379, _nft(nft_ct_new)).status == ProbeStatus.MET
+    nft_ct_untracked = nft_drop.replace(
+        "ct state established,related accept", "ct state established,related,untracked accept"
+    )
+    assert run_probe(pre_6379, _nft(nft_ct_untracked)).status == ProbeStatus.UNKNOWN
+
+    # Negated ICMP / quoted "icmp" / "lo-ext" / quoted "}" and "#" must not cause false NOT_MET
+    for bad_rule in (
+        "meta l4proto != icmp accept",
+        "ip protocol { icmp, 6 } accept",
+        'ip saddr 0.0.0.0/0 comment "not icmp" accept',
+        'iifname "lo-ext" accept',
+        'log prefix "redis #in " accept',
+    ):
+        nft_case = nft_drop.replace("tcp dport { 22, 443 } accept", bad_rule)
+        assert run_probe(pre_6379, _nft(nft_case)).status == ProbeStatus.UNKNOWN, bad_rule
+
+    nft_brace_comment = nft_drop.replace(
+        "tcp dport { 22, 443 } accept",
+        'counter comment "lo } end"\n        tcp dport 6379 accept',
+    )
+    assert run_probe(pre_6379, _nft(nft_brace_comment)).status == ProbeStatus.MET
+
+    # proto="any" matches protocol-specific port rules
+    pre_443_any = Precondition("firewall_allows_port", {"port": "443", "proto": "any"}, "any443")
+    assert run_probe(pre_443_any, _nft(nft_drop)).status == ProbeStatus.MET
+
+    # RHEL RPM alias: CVE-2025-26465 package 'openssh-client' resolves 'openssh-clients' on RHEL 9
+    ssh_client_pre = BUILTIN_SPECS["CVE-2025-26465"].preconditions[0]
+    rhel_ssh_client = MockRunner(
+        "rhel9-ssh",
+        {
+            ("rpm", "-q", "--qf", "%{EPOCHNUM}:%{VERSION}-%{RELEASE}\\n", "openssh-client"): CommandResult(
+                1, "package openssh-client is not installed\n", ""
+            ),
+            ("rpm", "-q", "--qf", "%{EPOCHNUM}:%{VERSION}-%{RELEASE}\\n", "openssh-clients"): CommandResult(
+                0, "0:8.7p1-38.el9\n", ""
+            ),
+            ("cat", "/etc/os-release"): CommandResult(0, 'ID="rhel"\nVERSION_ID="9.4"\n', ""),
+        },
+    )
+    assert run_probe(ssh_client_pre, rhel_ssh_client).status == ProbeStatus.MET
 
 
 # ---------------------------------------------------------------------------

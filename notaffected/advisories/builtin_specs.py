@@ -5,6 +5,10 @@ These work 100% offline with zero external API or LLM calls.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import yaml
+
 from notaffected.model import CheckSpec, PatchInfo, Precondition, VexJustification
 
 BUILTIN_SPECS: dict[str, CheckSpec] = {
@@ -306,7 +310,7 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         ],
         patch=PatchInfo(
             status="released",
-            fixed_version="KB5004945",
+            fixed_version="KB5004945 (OS Build 20348.2600)",
             pocket="msrc-out-of-band",
             advisory_url="https://msrc.microsoft.com/update-guide/vulnerability/CVE-2021-34527",
         ),
@@ -315,3 +319,53 @@ BUILTIN_SPECS: dict[str, CheckSpec] = {
         os_source="curated",
     ),
 }
+
+
+def _load_bundled_yaml_rules() -> dict[str, CheckSpec]:
+    """Load bundled YAML curated rules from `notaffected/rules/**/*.yaml` into `BUILTIN_SPECS`."""
+    rules_root = Path(__file__).resolve().parent.parent / "rules"
+    if not rules_root.is_dir():
+        return {}
+    loaded: dict[str, CheckSpec] = {}
+    for yf in sorted(rules_root.rglob("*.yaml")):
+        data = yaml.safe_load(yf.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("rules"), list):
+            continue
+        for raw in data["rules"]:
+            if not isinstance(raw, dict):
+                continue
+            cve_id = str(raw["cve_id"]).strip().upper()
+            pres = [
+                Precondition(
+                    probe=str(p["probe"]).strip(),
+                    params=dict(p.get("params") or {}),
+                    description=str(p.get("description") or "").strip(),
+                    justification_if_not_met=VexJustification(str(p["justification_if_not_met"]).strip()),
+                    origin="curated",
+                )
+                for p in raw.get("preconditions", [])
+            ]
+            raw_patch = raw.get("patch") or {}
+            patch = PatchInfo(
+                status=str(raw_patch.get("status") or "unknown"),
+                fixed_version=raw_patch.get("fixed_version"),
+                pocket=raw_patch.get("pocket"),
+                advisory_url=raw_patch.get("advisory_url"),
+            )
+            loaded[cve_id] = CheckSpec(
+                cve_id=cve_id,
+                summary=str(raw["summary"]).strip(),
+                severity=str(raw.get("severity") or "HIGH").strip().upper(),
+                preconditions=pres,
+                mitigation=[str(m).strip() for m in raw.get("mitigation", []) if str(m).strip()],
+                patch=patch,
+                confidence=str(raw.get("confidence") or "high").strip().lower(),
+                source="builtin",
+                os_family=str(raw.get("os_family") or "linux").strip().lower(),
+                os_source="curated",
+            )
+    return loaded
+
+
+for _cid, _spec in _load_bundled_yaml_rules().items():
+    BUILTIN_SPECS.setdefault(_cid, _spec)

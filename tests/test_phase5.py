@@ -144,7 +144,7 @@ def test_web_dashboard_endpoints_end_to_end() -> None:
             "offline": True,
         }
     )
-    assert eval_res["summary"]["total"] == 35  # 5 demo hosts * 7 builtin CVEs
+    assert eval_res["summary"]["total"] == 5 * len(BUILTIN_SPECS)  # 5 demo hosts * built-in CVEs
     assert eval_res["summary"]["affected"] == 4
     assert eval_res["openvex"]["@context"] == "https://openvex.dev/ns/v0.2.0"
 

@@ -508,20 +508,33 @@ def _try_apk_or_rpm_package(
 
     # Prefer EPOCHNUM:VERSION-RELEASE on RPM 4.11+ so epoch comparisons are exact;
     # fall back to VERSION-RELEASE if EPOCHNUM is unsupported or unmocked.
-    rpm_res = runner.run(["rpm", "-q", "--qf", "%{EPOCHNUM}:%{VERSION}-%{RELEASE}\\n", pkg])
-    if (
-        rpm_res.transport_error
-        or rpm_res.returncode == 127
-        or (rpm_res.returncode == 0 and "%{EPOCHNUM}" in rpm_res.stdout)
-    ):
-        rpm_res = runner.run(["rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\\n", pkg])
-    if not rpm_res.transport_error and rpm_res.returncode != 127:
+    _deb_to_rpm = {
+        "openssh-client": "openssh-clients",
+        "apache2": "httpd",
+        "redis-server": "redis",
+    }
+    rpm_candidates = [pkg] + ([_deb_to_rpm[pkg]] if pkg in _deb_to_rpm else [])
+    saw_absent_cmd = ""
+    for cand in rpm_candidates:
+        rpm_res = runner.run(["rpm", "-q", "--qf", "%{EPOCHNUM}:%{VERSION}-%{RELEASE}\\n", cand])
+        if (
+            rpm_res.transport_error
+            or rpm_res.returncode == 127
+            or (rpm_res.returncode == 0 and "%{EPOCHNUM}" in rpm_res.stdout)
+        ):
+            rpm_res = runner.run(["rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\\n", cand])
+        if rpm_res.transport_error or rpm_res.returncode == 127:
+            return None
         if rpm_res.returncode != 0 or not rpm_res.stdout.strip():
             if rpm_res.returncode == 1 or "not installed" in (rpm_res.stdout + rpm_res.stderr).lower():
-                return ("absent", "", f"rpm -q {pkg}")
+                if not saw_absent_cmd:
+                    saw_absent_cmd = f"rpm -q {cand}"
+                continue
             return None
         first = rpm_res.stdout.strip().splitlines()[0].strip()
-        return ("ii", first, f"rpm -q {pkg}")
+        return ("ii", first, f"rpm -q {cand}")
+    if saw_absent_cmd:
+        return ("absent", "", saw_absent_cmd)
 
     return None
 
@@ -1284,7 +1297,7 @@ def _try_firewalld_probe(
                 if "/" not in token:
                     continue
                 p_spec, p_proto = token.split("/", 1)
-                if p_proto.lower() != proto:
+                if proto != "any" and p_proto.lower() != proto:
                     continue
                 m_range = re.fullmatch(r"(\d+)-(\d+)", p_spec)
                 if (p_spec.isdigit() and int(p_spec) == port) or (
@@ -1301,7 +1314,7 @@ def _try_firewalld_probe(
                 if mapped is None:
                     undecided.append(f"zone '{zname}' service '{svc}'")
                     continue
-                if (port, proto) in mapped:
+                if any(sp_port == port and (proto == "any" or sp_proto == proto) for sp_port, sp_proto in mapped):
                     return ProbeResult(
                         precondition=pre,
                         status=ProbeStatus.MET,
@@ -1315,7 +1328,7 @@ def _try_firewalld_probe(
             if forward_ports:
                 undecided.append(f"zone '{zname}' forward-ports")
         else:
-            matching_ports = [p for p in ports if p.lower().endswith(f"/{proto}")]
+            matching_ports = [p for p in ports if proto == "any" or p.lower().endswith(f"/{proto}")]
             if matching_ports:
                 return ProbeResult(
                     precondition=pre,
@@ -1329,7 +1342,10 @@ def _try_firewalld_probe(
             matching_svcs = [
                 svc
                 for svc in services
-                if any(sp_proto == proto for _, sp_proto in _FIREWALLD_SERVICE_PORTS.get(svc.lower(), ()))
+                if any(
+                    proto == "any" or sp_proto == proto
+                    for _, sp_proto in _FIREWALLD_SERVICE_PORTS.get(svc.lower(), ())
+                )
             ]
             if matching_svcs:
                 return ProbeResult(
@@ -1384,6 +1400,30 @@ def _nft_dport_matches(spec: str, port: int) -> bool | None:
 _NFT_TABLE_FAMILIES = frozenset({"inet", "ip", "ip6", "arp", "bridge", "netdev"})
 
 
+def _strip_nft_quotes(text: str) -> str:
+    """Replace double-quoted string literals with empty quotes so braces/keywords inside comments/prefixes are ignored."""
+    return re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
+
+
+def _strip_nft_comment(raw_rule: str) -> str:
+    """Strip an unquoted `# ...` trailing comment from an nftables rule line."""
+    in_quote = False
+    escaped = False
+    for idx, ch in enumerate(raw_rule):
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_quote:
+            escaped = True
+            continue
+        if ch == '"':
+            in_quote = not in_quote
+            continue
+        if ch == "#" and not in_quote:
+            return raw_rule[:idx].strip().rstrip(";")
+    return raw_rule.strip().rstrip(";")
+
+
 def _extract_nft_input_chains(ruleset: str) -> list[tuple[str, str, list[str]]]:
     """Extract `(family, policy, rule_lines)` for every `type filter hook input` chain in `nft list ruleset`."""
     chains: list[tuple[str, str, list[str]]] = []
@@ -1393,25 +1433,27 @@ def _extract_nft_input_chains(ruleset: str) -> list[tuple[str, str, list[str]]]:
     table_depth = 0
     while i < len(lines):
         line = lines[i].strip()
+        unquoted = _strip_nft_quotes(line)
         if table_depth == 0:
-            m_tbl = re.match(r"^table\s+(\S+)(?:\s+\S+)?\s*\{", line)
+            m_tbl = re.match(r"^table\s+(\S+)(?:\s+\S+)?\s*\{", unquoted)
             if m_tbl:
                 first_tok = m_tbl.group(1)
                 current_family = first_tok if first_tok in _NFT_TABLE_FAMILIES else "ip"
-                table_depth = line.count("{") - line.count("}")
+                table_depth = unquoted.count("{") - unquoted.count("}")
                 i += 1
                 continue
             i += 1
             continue
 
-        if line.startswith("chain ") and "{" in line:
-            chain_depth = line.count("{") - line.count("}")
+        if unquoted.startswith("chain ") and "{" in unquoted:
+            chain_depth = unquoted.count("{") - unquoted.count("}")
             table_depth += chain_depth
             body: list[str] = []
             i += 1
             while i < len(lines) and chain_depth > 0:
                 cur = lines[i]
-                delta = cur.count("{") - cur.count("}")
+                cur_unq = _strip_nft_quotes(cur)
+                delta = cur_unq.count("{") - cur_unq.count("}")
                 chain_depth += delta
                 table_depth += delta
                 if chain_depth > 0:
@@ -1432,7 +1474,7 @@ def _extract_nft_input_chains(ruleset: str) -> list[tuple[str, str, list[str]]]:
                 chains.append((current_family, policy, rules))
             continue
 
-        table_depth += line.count("{") - line.count("}")
+        table_depth += unquoted.count("{") - unquoted.count("}")
         if table_depth <= 0:
             table_depth = 0
             current_family = ""
@@ -1440,17 +1482,33 @@ def _extract_nft_input_chains(ruleset: str) -> list[tuple[str, str, list[str]]]:
     return chains
 
 
+def _is_established_only_nft_rule(rule: str) -> bool:
+    """Return True only when a `ct state` rule exclusively matches established/related packets."""
+    unq = _strip_nft_quotes(rule)
+    if "!=" in unq:
+        return False
+    m = re.search(r"\bct\s+state\s+(?:\{([^}]*)\}|([A-Za-z0-9_,]+))", unq)
+    if not m:
+        return False
+    raw_states = m.group(1) if m.group(1) is not None else m.group(2)
+    tokens = [t.strip().lower() for t in raw_states.split(",") if t.strip()]
+    return bool(tokens) and all(t in ("established", "related") for t in tokens)
+
+
 def _is_icmp_only_nft_rule(rule: str) -> bool:
     """Return True only when an nftables accept rule exclusively matches ICMP/ICMPv6."""
-    if not re.search(r"\b(?:icmp|icmpv6)\b", rule):
+    unq = _strip_nft_quotes(rule)
+    if "!=" in unq or re.search(r"\b(?:tcp|udp|th|sctp|dccp|udplite)\b", unq):
         return False
-    if re.search(r"\b(?:tcp|udp|th|sctp|dccp|udplite)\b", rule):
-        return False
-    m_set = re.search(r"\bmeta\s+l4proto\s*\{([^}]*)\}", rule)
+    if re.search(r"\b(?:icmp|icmpv6)\s+(?:type|code)\b", unq):
+        return True
+    if re.search(r"\b(?:ip\s+protocol|ip6\s+nexthdr|meta\s+l4proto)\s+(?:icmp|icmpv6)\b", unq):
+        return True
+    m_set = re.search(r"\b(?:ip\s+protocol|ip6\s+nexthdr|meta\s+l4proto)\s*\{([^}]*)\}", unq)
     if m_set:
         tokens = [t.strip().lower() for t in m_set.group(1).split(",") if t.strip()]
         return bool(tokens) and all(t in ("icmp", "icmpv6") for t in tokens)
-    return True
+    return False
 
 
 def _try_nftables_probe(
@@ -1503,27 +1561,31 @@ def _try_nftables_probe(
     undecided: list[str] = []
     for _fam, _pol, rules in deny_chains:
         for raw_rule in rules:
-            rule = re.sub(r"\s*#.*$", "", raw_rule).strip().rstrip(";")
+            rule = _strip_nft_comment(raw_rule)
             if not rule:
                 continue
-            # Ignore loopback, established/related state, and ICMP-only accept rules.
-            if re.search(r'\b(?:iif|iifname)\s+"?lo"?\b', rule):
+            unq_rule = _strip_nft_quotes(rule)
+            # Ignore loopback, established/related-only state, and ICMP-only accept rules.
+            if re.search(r'\b(?:iif|iifname)\s+(?:"lo"|lo)(?=\s|$|;)', rule):
                 continue
-            if re.search(r"\bct\s+state\b.*\b(?:established|related)\b", rule) and "new" not in rule.split():
+            if _is_established_only_nft_rule(rule):
                 continue
             if _is_icmp_only_nft_rule(rule):
                 continue
-            if re.search(r"\b(?:jump|goto)\b", rule):
+            if re.search(r"\b(?:jump|goto)\b", unq_rule):
                 undecided.append(f"non-inline jump/goto ({rule[:48]})")
                 continue
-            if not re.search(r"\baccept\b", rule):
+            if not re.search(r"\baccept\b", unq_rule):
                 continue
 
             if port is None:
                 # port == "any": any non-loopback/non-established accept rule for this proto or generic
-                other_proto = "udp" if proto == "tcp" else "tcp"
-                if re.search(rf"\b{other_proto}\s+dport\b", rule) and not re.search(rf"\b{proto}\s+dport\b", rule):
-                    continue
+                if proto != "any":
+                    other_proto = "udp" if proto == "tcp" else "tcp"
+                    if re.search(rf"\b{other_proto}\s+dport\b", unq_rule) and not re.search(
+                        rf"\b{proto}\s+dport\b", unq_rule
+                    ):
+                        continue
                 return ProbeResult(
                     precondition=pre,
                     status=ProbeStatus.MET,
@@ -1533,17 +1595,17 @@ def _try_nftables_probe(
 
             m_dport = re.search(
                 r"\b(?P<p>tcp|udp|th)\s+dport\s+(?P<spec>\{[^}]+\}|@\S+|\d+\s*-\s*\d+|\d+)",
-                rule,
+                unq_rule,
             )
             if m_dport:
                 r_proto = m_dport.group("p")
-                if r_proto != "th" and r_proto != proto:
+                if r_proto != "th" and proto != "any" and r_proto != proto:
                     continue
                 hit = _nft_dport_matches(m_dport.group("spec"), port)
                 if hit is None:
                     undecided.append(f"unresolved port set ({rule[:48]})")
                 elif hit:
-                    if re.search(r"\b(?:ip|ip6)\s+saddr\b|\b(?:iif|iifname)\b", rule):
+                    if re.search(r"\b(?:ip|ip6)\s+saddr\b|\b(?:iif|iifname)\b", unq_rule):
                         undecided.append(f"source/interface-restricted rule ({rule[:48]})")
                     else:
                         return ProbeResult(
@@ -1627,7 +1689,7 @@ def _probe_firewall_allows_port(pre: Precondition, runner: HostRunner) -> ProbeR
                 port = int(port_raw)
                 undecided: list[str] = []
                 for rule in allowing:
-                    if rule.proto not in (None, proto):
+                    if proto != "any" and rule.proto not in (None, proto):
                         continue
                     hit = _ufw_port_matches(rule.ports, port)
                     if hit is None:

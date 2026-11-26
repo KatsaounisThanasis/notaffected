@@ -1,0 +1,153 @@
+# Bundled Linux Kernel Curated Rules (verified against OSV.dev & Red Hat Security Data)
+rules:
+  - cve_id: CVE-2024-1086
+    summary: "Linux kernel Netfilter nf_tables double-free / use-after-free local privilege escalation (CISA KEV)"
+    severity: HIGH
+    os_family: linux
+    confidence: high
+    preconditions:
+      - probe: kernel_version_vulnerable
+        params:
+          fixed_version: "6.6.15"
+          mainline_from: "6.8"
+          track_fixes:
+            "ubuntu:20.04:5.4:generic": "5.4.0-174"
+            "ubuntu:22.04:5.15:generic": "5.15.0-101"
+        description: "Running Linux kernel predates the CVE-2024-1086 nf_tables patch"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: kernel_module_loaded
+        params:
+          module: nf_tables
+        description: "Netfilter kernel module 'nf_tables' is loaded"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+      - probe: sysctl_equals
+        params:
+          key: kernel.unprivileged_userns_clone
+          value: "1"
+        description: "Unprivileged user namespaces are enabled (kernel.unprivileged_userns_clone=1)"
+        justification_if_not_met: inline_mitigations_already_exist
+    mitigation:
+      - "sudo sysctl -w kernel.unprivileged_userns_clone=0"
+      - "sudo modprobe -r nf_tables"
+      - "Add 'install nf_tables /bin/true' under /etc/modprobe.d/disable-nf-tables.conf if nftables is unused"
+    patch:
+      status: released
+      fixed_version: "6.6.15"
+      advisory_url: "https://ubuntu.com/security/CVE-2024-1086"
+
+  - cve_id: CVE-2025-39682
+    summary: "Linux kernel TLS (kTLS) zero-length record receive-path memory corruption / DoS (CISA KEV)"
+    severity: CRITICAL
+    os_family: linux
+    confidence: high
+    preconditions:
+      - probe: kernel_version_vulnerable
+        params:
+          fixed_version: "6.8.0-86"
+          mainline_from: "6.16"
+          track_fixes:
+            "ubuntu:22.04:6.8:generic": "6.8.0-86"
+            "ubuntu:24.04:6.8:generic": "6.8.0-86"
+        description: "Running Linux kernel predates the CVE-2025-39682 kTLS patch"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: kernel_module_loaded
+        params:
+          module: tls
+        description: "Kernel TLS offload module 'tls' is loaded"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "sudo modprobe -r tls"
+      - "Add 'install tls /bin/true' under /etc/modprobe.d/disable-ktls.conf if kTLS offload is unused"
+    patch:
+      status: released
+      fixed_version: "6.8.0-86"
+      advisory_url: "https://ubuntu.com/security/CVE-2025-39682"
+
+  - cve_id: CVE-2026-53266
+    summary: "Linux kernel Netfilter bridge ebt_snat ARP rewrite out-of-bounds write LPE/DoS (CISA KEV)"
+    severity: HIGH
+    os_family: linux
+    confidence: high
+    preconditions:
+      - probe: kernel_version_vulnerable
+        params:
+          fixed_version: "6.8.0-146"
+          track_fixes:
+            "ubuntu:22.04:5.15:generic": "5.15.0-198"
+            "ubuntu:24.04:6.8:generic": "6.8.0-146"
+            "ubuntu:26.04:7.0:generic": "7.0.0-31"
+        description: "Running Linux kernel predates the CVE-2026-53266 ebt_snat patch"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: kernel_module_loaded
+        params:
+          module: ebt_snat
+        description: "Netfilter bridge SNAT kernel module 'ebt_snat' is loaded"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "sudo modprobe -r ebt_snat"
+      - "Add 'install ebt_snat /bin/true' under /etc/modprobe.d/disable-ebt-snat.conf if ebtables SNAT is unused"
+    patch:
+      status: released
+      fixed_version: "6.8.0-146"
+      advisory_url: "https://ubuntu.com/security/CVE-2026-53266"
+
+  - cve_id: CVE-2025-21756
+    summary: "Linux kernel AF_VSOCK transport reassignment use-after-free local privilege escalation (CISA KEV)"
+    severity: HIGH
+    os_family: linux
+    confidence: high
+    preconditions:
+      - probe: kernel_version_vulnerable
+        params:
+          fixed_version: "6.8.0-58"
+          mainline_from: "6.13"
+          track_fixes:
+            "ubuntu:22.04:5.15:generic": "5.15.0-138"
+            "ubuntu:24.04:6.8:generic": "6.8.0-58"
+        description: "Running Linux kernel predates the CVE-2025-21756 vsock patch"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: kernel_module_loaded
+        params:
+          module: vsock
+        description: "Virtual Socket kernel module 'vsock' is loaded"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+    mitigation:
+      - "sudo modprobe -r vsock"
+      - "Add 'install vsock /bin/true' and 'blacklist net-pf-40' under /etc/modprobe.d/disable-vsock.conf"
+    patch:
+      status: released
+      fixed_version: "6.8.0-58"
+      advisory_url: "https://ubuntu.com/security/CVE-2025-21756"
+
+  - cve_id: CVE-2023-0386
+    summary: "Linux kernel OverlayFS setuid copy-up local privilege escalation via user namespaces"
+    severity: HIGH
+    os_family: linux
+    confidence: high
+    preconditions:
+      - probe: kernel_version_vulnerable
+        params:
+          fixed_version: "6.1.11"
+          mainline_from: "6.2"
+          track_fixes:
+            "ubuntu:22.04:5.15:generic": "5.15.0-70"
+        description: "Running Linux kernel predates the CVE-2023-0386 OverlayFS patch"
+        justification_if_not_met: vulnerable_code_not_present
+      - probe: kernel_module_loaded
+        params:
+          module: overlay
+        description: "OverlayFS kernel module 'overlay' is loaded"
+        justification_if_not_met: vulnerable_code_not_in_execute_path
+      - probe: sysctl_equals
+        params:
+          key: kernel.unprivileged_userns_clone
+          value: "1"
+        description: "Unprivileged user namespaces are enabled (kernel.unprivileged_userns_clone=1)"
+        justification_if_not_met: inline_mitigations_already_exist
+    mitigation:
+      - "sudo sysctl -w kernel.unprivileged_userns_clone=0"
+      - "Upgrade the Linux kernel to a patched release and reboot"
+    patch:
+      status: released
+      fixed_version: "6.1.11"
+      advisory_url: "https://ubuntu.com/security/CVE-2023-0386"

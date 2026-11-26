@@ -98,13 +98,13 @@ notaffected scan -i inventory.yaml --emit-vex vex.json --html report.html
 notaffected scan --demo-fleet --offline --emit-vex demo.vex.json --html demo.html
 ```
 
-Example CLI summary on the mixed 5-host demo fleet (35 scanner-equivalent alerts cut down to 4 real exposures):
+Example CLI summary on the mixed 5-host demo fleet (125 scanner-equivalent alerts cut down to 4 real exposures):
 ```text
-Auto-Scan Feed: 7 built-in rules | 0 live OSV package CVEs | 0 live CISA KEV CVEs
+Auto-Scan Feed: 25 built-in rules | 0 live OSV package CVEs | 0 live CISA KEV CVEs
 AFFECTED (4)            prod-edge-api-01 (CVE-2026-98432, CVE-2024-6387)
                         win-dc-01        (CVE-2024-38063, CVE-2021-34527)
-NOT AFFECTED (31)       88.6% false-positive noise cut with OpenVEX v0.2.0 proof
-OpenVEX v0.2.0 written to: demo.vex.json (35 statement(s))
+NOT AFFECTED (112)      89.6% false-positive noise cut with OpenVEX v0.2.0 proof (9 under_investigation)
+OpenVEX v0.2.0 written to: demo.vex.json (125 statement(s))
 ```
 
 ### 3. Inspect extracted preconditions & mitigations for any CVE
